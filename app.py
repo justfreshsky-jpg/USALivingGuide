@@ -560,7 +560,7 @@ async function call(endpoint,data,outId,btnId,label){
   const btn=document.getElementById(btnId);
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Step 1/3: Preparing info';
-  out.textContent='Step 2/3: Generating response with Vertex AI...';
+  out.textContent='Step 2/3: Generating your guide...';
   try{
     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const j=await r.json().catch(()=>({}));
