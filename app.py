@@ -7,7 +7,6 @@ import threading
 import time
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template_string
-os.environ['HTTPX_PROXIES'] = 'null'
 
 # ─── LOGGING ────────────────────────────────────────────────
 _log_dir = os.environ.get('LOG_DIR', 'logs')
@@ -93,6 +92,8 @@ def call_vertex(prompt):
 
 # ─── BACKGROUND BLOG CONTENT ─────────────────────────────
 _cache = {"content": "", "last": 0}
+_refresh_thread_started = False
+_refresh_thread_lock = threading.Lock()
 
 FALLBACK = """
 [TAX] Rideshare tax forms are released at the end of January. 1099-K, 1099-NEC required.
@@ -147,7 +148,15 @@ def _bg_refresh():
         _fetch_blog()
         time.sleep(3600)
 
-threading.Thread(target=_bg_refresh, daemon=True).start()
+def ensure_bg_refresh_started():
+    global _refresh_thread_started
+    if _refresh_thread_started:
+        return
+    with _refresh_thread_lock:
+        if _refresh_thread_started:
+            return
+        threading.Thread(target=_bg_refresh, daemon=True).start()
+        _refresh_thread_started = True
 
 def get_context():
     if not _cache["content"]:
@@ -162,11 +171,9 @@ def local_fallback_reply(user):
     )
     sample = "\n".join(sample.splitlines()[:8])
     return (
-        "⚠️ Vertex AI configuration is missing, so showing a quick guide summary instead of an AI response.\n\n"
-        f"📌 Question: {user or 'General question'}\n"
-        "✅ Full AI answers will return once you add GOOGLE_CLOUD_PROJECT and VERTEX_LOCATION to Cloud Run env variables.\n"
-        "✅ Grant the Vertex AI User (roles/aiplatform.user) role to the service account.\n"
-        "\nQuick Info:\n"
+        "✅ Quick USA Living Guide\n\n"
+        f"📌 Topic: {user or 'General question'}\n\n"
+        "Here is a practical summary based on the latest guide data:\n"
         f"{sample}"
     )
 
@@ -303,9 +310,9 @@ textarea{resize:vertical;min-height:90px}
     <span class="step">3️⃣ Get Your Checklist</span>
   </div>
   <div class="hero-cta">
-    <button onclick="quickStart('ssn')">Start with SSN</button>
-    <button onclick="quickStart('visa')">Visa Plan</button>
-    <button onclick="quickStart('ask')">Quick Question</button>
+    <button type="button" data-quickstart="ssn">Start with SSN</button>
+    <button type="button" data-quickstart="visa">Visa Plan</button>
+    <button type="button" data-quickstart="ask">Quick Question</button>
   </div>
 </div>
 <div class="container">
@@ -318,26 +325,26 @@ textarea{resize:vertical;min-height:90px}
     🍎 <strong>Usage tip:</strong> First pick a goal card, then generate a guide based on your situation.
   </div>
   <div class="goal-grid">
-    <div class="goal-card" onclick="quickStart('ssn')"><h4>SSN Application</h4><p>Documents + office steps</p></div>
-    <div class="goal-card" onclick="quickStart('bank')"><h4>Bank Account</h4><p>Options without SSN</p></div>
-    <div class="goal-card" onclick="quickStart('housing')"><h4>Rent an Apartment</h4><p>Budget + lease checklist</p></div>
-    <div class="goal-card" onclick="quickStart('tax')"><h4>Tax Guide</h4><p>Forms + deadline summary</p></div>
+    <div class="goal-card" data-quickstart="ssn"><h4>SSN Application</h4><p>Documents + office steps</p></div>
+    <div class="goal-card" data-quickstart="bank"><h4>Bank Account</h4><p>Options without SSN</p></div>
+    <div class="goal-card" data-quickstart="housing"><h4>Rent an Apartment</h4><p>Budget + lease checklist</p></div>
+    <div class="goal-card" data-quickstart="tax"><h4>Tax Guide</h4><p>Forms + deadline summary</p></div>
   </div>
   <div class="tabs" id="topicTabs">
-    <button class="active" onclick="show('visa',this)"><i class="fas fa-passport"></i>Visa</button>
-    <button onclick="show('tax',this)"><i class="fas fa-calculator"></i>Tax</button>
-    <button onclick="show('rideshare',this)"><i class="fas fa-car"></i>Gig Work</button>
-    <button onclick="show('housing',this)"><i class="fas fa-home"></i>Housing</button>
-    <button onclick="show('health',this)"><i class="fas fa-heartbeat"></i>Health</button>
-    <button onclick="show('license',this)"><i class="fas fa-id-card"></i>License</button>
-    <button onclick="show('ssn',this)"><i class="fas fa-id-card-alt"></i>SSN</button>
-    <button onclick="show('bank',this)"><i class="fas fa-university"></i>Bank</button>
-    <button onclick="show('phone',this)"><i class="fas fa-phone"></i>Phone</button>
-    <button onclick="show('car',this)"><i class="fas fa-car-side"></i>Car</button>
-    <button onclick="show('transfer',this)"><i class="fas fa-exchange-alt"></i>Money Transfer</button>
-    <button onclick="show('flights',this)"><i class="fas fa-plane"></i>Flights</button>
-    <button onclick="show('ask',this)"><i class="fas fa-question-circle"></i>Ask</button>
-    <button onclick="show('feedback',this)"><i class="fas fa-comment-dots"></i>Feedback</button>
+    <button type="button" class="active" data-tab="visa"><i class="fas fa-passport"></i>Visa</button>
+    <button type="button" data-tab="tax"><i class="fas fa-calculator"></i>Tax</button>
+    <button type="button" data-tab="rideshare"><i class="fas fa-car"></i>Gig Work</button>
+    <button type="button" data-tab="housing"><i class="fas fa-home"></i>Housing</button>
+    <button type="button" data-tab="health"><i class="fas fa-heartbeat"></i>Health</button>
+    <button type="button" data-tab="license"><i class="fas fa-id-card"></i>License</button>
+    <button type="button" data-tab="ssn"><i class="fas fa-id-card-alt"></i>SSN</button>
+    <button type="button" data-tab="bank"><i class="fas fa-university"></i>Bank</button>
+    <button type="button" data-tab="phone"><i class="fas fa-phone"></i>Phone</button>
+    <button type="button" data-tab="car"><i class="fas fa-car-side"></i>Car</button>
+    <button type="button" data-tab="transfer"><i class="fas fa-exchange-alt"></i>Money Transfer</button>
+    <button type="button" data-tab="flights"><i class="fas fa-plane"></i>Flights</button>
+    <button type="button" data-tab="ask"><i class="fas fa-question-circle"></i>Ask</button>
+    <button type="button" data-tab="feedback"><i class="fas fa-comment-dots"></i>Feedback</button>
   </div>
 
   <div id="visa" class="tab active"><div class="card">
@@ -348,8 +355,8 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>State</label><input id="v2" placeholder="e.g. New Jersey"></div>
     </div>
     <div class="field"><label>Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied"></div>
-    <button class="btn" id="vb" onclick="call('/visa',{type:g('v1'),state:g('v2'),situation:g('v3')},'vo','vb','Generate Visa Plan')">Generate Visa Plan</button>
-    <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('vo')">Copy</button></div>
+    <button type="button" class="btn" id="vb" data-action="visa">Generate Visa Plan</button>
+    <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="vo">Copy</button></div>
   </div></div>
 
   <div id="tax" class="tab"><div class="card">
@@ -363,8 +370,8 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
       <div class="field"><label>State</label><input id="t4" placeholder="New Jersey"></div>
     </div>
-    <button class="btn" id="tb" onclick="call('/tax',{form:g('t1'),income:g('t2'),visa:g('t3'),state:g('t4')},'to','tb','Generate Tax Checklist')">Generate Tax Checklist</button>
-    <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('to')">Copy</button></div>
+    <button type="button" class="btn" id="tb" data-action="tax">Generate Tax Checklist</button>
+    <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
   </div></div>
 
   <div id="rideshare" class="tab"><div class="card">
@@ -375,8 +382,8 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>State</label><input id="r2" placeholder="New Jersey"></div>
     </div>
     <div class="field"><label>Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
-    <button class="btn" id="rb" onclick="call('/rideshare',{app:g('r1'),state:g('r2'),topic:g('r3')},'ro','rb','Rideshare Guide')">Generate Plan</button>
-    <div class="output-wrap"><div id="ro" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('ro')">Copy</button></div>
+    <button type="button" class="btn" id="rb" data-action="rideshare">Generate Plan</button>
+    <div class="output-wrap"><div id="ro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ro">Copy</button></div>
   </div></div>
 
   <div id="housing" class="tab"><div class="card">
@@ -387,8 +394,8 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>Budget ($/month)</label><input id="e2" type="number" placeholder="1200"></div>
     </div>
     <div class="field"><label>Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets"></div>
-    <button class="btn" id="eb" onclick="call('/housing',{city:g('e1'),budget:g('e2'),situation:g('e3')},'eo','eb','Housing Guide')">Generate Plan</button>
-    <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('eo')">Copy</button></div>
+    <button type="button" class="btn" id="eb" data-action="housing">Generate Plan</button>
+    <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="eo">Copy</button></div>
   </div></div>
 
   <div id="health" class="tab"><div class="card">
@@ -398,8 +405,8 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>State</label><input id="h1" placeholder="New Jersey"></div>
       <div class="field"><label>Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
     </div>
-    <button class="btn" id="hb" onclick="call('/health',{state:g('h1'),situation:g('h2')},'ho','hb','Health Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="ho" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('ho')">Copy</button></div>
+    <button type="button" class="btn" id="hb" data-action="health">Generate Guide</button>
+    <div class="output-wrap"><div id="ho" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ho">Copy</button></div>
   </div></div>
 
   <div id="license" class="tab"><div class="card">
@@ -409,8 +416,8 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>State</label><input id="l1" placeholder="New Jersey"></div>
       <div class="field"><label>Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
     </div>
-    <button class="btn" id="lb" onclick="call('/license',{state:g('l1'),situation:g('l2')},'lo','lb','License Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="lo" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('lo')">Copy</button></div>
+    <button type="button" class="btn" id="lb" data-action="license">Generate Guide</button>
+    <div class="output-wrap"><div id="lo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="lo">Copy</button></div>
   </div></div>
 
 <div id="ssn" class="tab">
@@ -438,10 +445,10 @@ textarea{resize:vertical;min-height:90px}
       <label>Situation</label>
       <input id="ss3" placeholder="e.g. CPT approved, waiting for OPT, do I need ITIN?">
     </div>
-    <button class="btn" id="ssb" onclick="call('/ssn',{visa:g('ss1'),state:g('ss2'),situation:g('ss3')},'sso','ssb','Generate SSN Guide')">Generate SSN Guide</button>
+    <button type="button" class="btn" id="ssb" data-action="ssn">Generate SSN Guide</button>
     <div class="output-wrap">
       <div id="sso" class="output">Results will appear here...</div>
-      <button class="copy-btn" onclick="cp('sso')">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="sso">Copy</button>
     </div>
   </div>
 </div>
@@ -450,16 +457,16 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-university"></i> Open a Bank Account</h2>
     <div class="hint">💳 <strong>Tip:</strong> Chase/BofA open accounts with passport. Start credit score with a secured card.</div>
     <div class="field"><label>Situation</label><select id="ba1"><option>Open bank account without SSN</option><option>Get a credit card</option><option>Build credit score from scratch</option><option>Best free bank?</option></select></div>
-    <button class="btn" id="bb" onclick="call('/bank',{situation:g('ba1')},'bo','bb','Bank Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="bo" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('bo')">Copy</button></div>
+    <button type="button" class="btn" id="bb" data-action="bank">Generate Guide</button>
+    <div class="output-wrap"><div id="bo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="bo">Copy</button></div>
   </div></div>
 
   <div id="phone" class="tab"><div class="card">
     <h2><i class="fas fa-phone"></i> US Phone Number</h2>
     <div class="hint">📱 <strong>Tip:</strong> Get a free US number without SSN using Google Voice.</div>
     <div class="field"><label>Topic</label><select id="p1"><option>Free number (Google Voice)</option><option>Cheap plans (Mint, Visible, T-Mobile)</option><option>Contract plan without SSN</option><option>Cheap international calls</option></select></div>
-    <button class="btn" id="pb" onclick="call('/phone',{topic:g('p1')},'po','pb','Phone Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="po" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('po')">Copy</button></div>
+    <button type="button" class="btn" id="pb" data-action="phone">Generate Guide</button>
+    <div class="output-wrap"><div id="po" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="po">Copy</button></div>
   </div></div>
 
   <div id="car" class="tab"><div class="card">
@@ -469,16 +476,16 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>State</label><input id="ar1" placeholder="New Jersey"></div>
       <div class="field"><label>Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
     </div>
-    <button class="btn" id="arb" onclick="call('/car',{state:g('ar1'),topic:g('ar2')},'aro','arb','Car Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="aro" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('aro')">Copy</button></div>
+    <button type="button" class="btn" id="arb" data-action="car">Generate Guide</button>
+    <div class="output-wrap"><div id="aro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="aro">Copy</button></div>
   </div></div>
 
   <div id="transfer" class="tab"><div class="card">
     <h2><i class="fas fa-exchange-alt"></i> Money Transfer (Wise / Zelle)</h2>
     <div class="hint">💸 <strong>Tip:</strong> Send money internationally with the lowest fees using Wise.</div>
     <div class="field"><label>Topic</label><select id="w1"><option>Send money abroad with Wise</option><option>Wise limits and fees</option><option>How to use Zelle?</option><option>Venmo / CashApp guide</option></select></div>
-    <button class="btn" id="wb" onclick="call('/transfer',{topic:g('w1')},'wo','wb','Money Transfer Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="wo" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('wo')">Copy</button></div>
+    <button type="button" class="btn" id="wb" data-action="transfer">Generate Guide</button>
+    <div class="output-wrap"><div id="wo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="wo">Copy</button></div>
   </div></div>
 
   <div id="flights" class="tab"><div class="card">
@@ -488,16 +495,16 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label>Airline</label><select id="u1"><option>Turkish Airlines</option><option>American Airlines</option><option>United</option><option>Delta</option></select></div>
       <div class="field"><label>Topic</label><select id="u2"><option>Baggage fees and rules</option><option>How to find cheapest tickets?</option><option>Check-in guide</option><option>Refund / cancellation policy</option></select></div>
     </div>
-    <button class="btn" id="ub" onclick="call('/flights',{airline:g('u1'),topic:g('u2')},'uo','ub','Flight Guide')">Generate Guide</button>
-    <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button class="copy-btn" onclick="cp('uo')">Copy</button></div>
+    <button type="button" class="btn" id="ub" data-action="flights">Generate Guide</button>
+    <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="uo">Copy</button></div>
   </div></div>
 
   <div id="ask" class="tab"><div class="card">
     <h2><i class="fas fa-question-circle"></i> Ask Any Question</h2>
     <div class="hint">🤖 Ask anything about life in the USA. You'll get a detailed answer.</div>
     <div class="field"><label>What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?"></textarea></div>
-    <button class="btn" id="qb" onclick="call('/ask',{question:g('q1')},'qo','qb','Answer')">Answer</button>
-    <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button class="copy-btn" onclick="cp('qo')">Copy</button></div>
+    <button type="button" class="btn" id="qb" data-action="ask">Answer</button>
+    <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button type="button" class="copy-btn" data-copy-target="qo">Copy</button></div>
   </div></div>
 
   <div id="feedback" class="tab"><div class="card">
@@ -505,7 +512,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">💬 Share your experience: what worked, what's missing, what should we improve?</div>
     <div class="field"><label>Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..."></textarea></div>
     <div class="field"><label>Optional Email</label><input id="fb2" placeholder="name@example.com"></div>
-    <button class="btn" id="fbb" onclick="sendFeedback()">Submit Feedback</button>
+    <button type="button" class="btn" id="fbb" data-action="feedback">Submit Feedback</button>
     <div class="output-wrap"><div id="fbo" class="output">Feedback status message will appear here...</div></div>
   </div></div>
 
@@ -527,7 +534,7 @@ function quickStart(tab){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
   target.classList.add('active');
-  const match=[...document.querySelectorAll('.tabs button')].find(b=>{const h=b.getAttribute('onclick'); return h && h.indexOf("'"+tab+"'")>-1;});
+  const match=[...document.querySelectorAll('.tabs button')].find(b=>b.dataset.tab===tab);
   if(match) match.classList.add('active');
   const firstInput=target.querySelector('input,select,textarea');
   if(firstInput) firstInput.focus({preventScroll:true});
@@ -553,7 +560,7 @@ async function call(endpoint,data,outId,btnId,label){
   const btn=document.getElementById(btnId);
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Step 1/3: Preparing info';
-  out.textContent='Step 2/3: Generating response with Vertex AI...';
+  out.textContent='Step 2/3: Generating your guide...';
   try{
     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const j=await r.json().catch(()=>({}));
@@ -561,7 +568,7 @@ async function call(endpoint,data,outId,btnId,label){
       out.textContent='Error: '+(j.error || 'Request could not be processed.');
       return;
     }
-    out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
+    out.textContent='Step 3/3: Result ready ✅\\n\\n'+(j.result || 'Could not generate result.');
     lastAnswers[outId]=j.result || '';
     ensureFollowupBox(outId);
   }catch(e){
@@ -613,7 +620,7 @@ function followup(outId,inputId,btnId){
   const q=((el && el.value) || '').trim();
   if(!q) return;
   const previous=lastAnswers[outId] || '';
-  const prompt='Previous answer:\n'+previous+'\n\nFollow-up question:\n'+q+'\n\nPlease explain more clearly, step by step, with examples.';
+  const prompt='Previous answer:\\n'+previous+'\\n\\nFollow-up question:\\n'+q+'\\n\\nPlease explain more clearly, step by step, with examples.';
   call('/ask',{question:prompt},outId,btnId,'Ask Follow-up');
 }
 
@@ -633,15 +640,52 @@ async function sendFeedback(){
   }
 }
 
+const ACTIONS = {
+  visa: () => call('/visa',{type:g('v1'),state:g('v2'),situation:g('v3')},'vo','vb','Generate Visa Plan'),
+  tax: () => call('/tax',{form:g('t1'),income:g('t2'),visa:g('t3'),state:g('t4')},'to','tb','Generate Tax Checklist'),
+  rideshare: () => call('/rideshare',{app:g('r1'),state:g('r2'),topic:g('r3')},'ro','rb','Rideshare Guide'),
+  housing: () => call('/housing',{city:g('e1'),budget:g('e2'),situation:g('e3')},'eo','eb','Housing Guide'),
+  health: () => call('/health',{state:g('h1'),situation:g('h2')},'ho','hb','Health Guide'),
+  license: () => call('/license',{state:g('l1'),situation:g('l2')},'lo','lb','License Guide'),
+  ssn: () => call('/ssn',{visa:g('ss1'),state:g('ss2'),situation:g('ss3')},'sso','ssb','Generate SSN Guide'),
+  bank: () => call('/bank',{situation:g('ba1')},'bo','bb','Bank Guide'),
+  phone: () => call('/phone',{topic:g('p1')},'po','pb','Phone Guide'),
+  car: () => call('/car',{state:g('ar1'),topic:g('ar2')},'aro','arb','Car Guide'),
+  transfer: () => call('/transfer',{topic:g('w1')},'wo','wb','Money Transfer Guide'),
+  flights: () => call('/flights',{airline:g('u1'),topic:g('u2')},'uo','ub','Flight Guide'),
+  ask: () => call('/ask',{question:g('q1')},'qo','qb','Answer'),
+  feedback: () => sendFeedback()
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => show(btn.dataset.tab, btn));
+  });
+  document.querySelectorAll('[data-quickstart]').forEach(el => {
+    el.addEventListener('click', () => quickStart(el.dataset.quickstart));
+  });
+  document.querySelectorAll('[data-copy-target]').forEach(btn => {
+    btn.addEventListener('click', () => cp(btn.dataset.copyTarget));
+  });
+  document.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fn = ACTIONS[btn.dataset.action];
+      if (fn) fn();
+    });
+  });
+});
+
 </script>
 </body>
 </html>"""# ─── ROUTES ──────────────────────────────────────────
 @app.route('/')
 def index():
+    ensure_bg_refresh_started()
     return render_template_string(HTML)
 
 @app.route('/healthz')
 def healthz():
+    ensure_bg_refresh_started()
     return jsonify(
         status='ok',
         ai_provider='vertex_ai_gemini',
@@ -770,4 +814,5 @@ def do_feedback():
     return jsonify(result='Thank you! Your feedback has been received and added to the improvement list.', total_feedback=len(_feedback_store))
 
 if __name__ == '__main__':
+    ensure_bg_refresh_started()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
