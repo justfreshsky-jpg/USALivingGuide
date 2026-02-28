@@ -7,7 +7,6 @@ import threading
 import time
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template_string
-os.environ['HTTPX_PROXIES'] = 'null'
 
 # ─── LOGGING ────────────────────────────────────────────────
 _log_dir = os.environ.get('LOG_DIR', 'logs')
@@ -93,6 +92,8 @@ def call_vertex(prompt):
 
 # ─── BACKGROUND BLOG CONTENT ─────────────────────────────
 _cache = {"content": "", "last": 0}
+_refresh_thread_started = False
+_refresh_thread_lock = threading.Lock()
 
 FALLBACK = """
 [TAX] Rideshare tax forms are released at the end of January. 1099-K, 1099-NEC required.
@@ -147,7 +148,15 @@ def _bg_refresh():
         _fetch_blog()
         time.sleep(3600)
 
-threading.Thread(target=_bg_refresh, daemon=True).start()
+def ensure_bg_refresh_started():
+    global _refresh_thread_started
+    if _refresh_thread_started:
+        return
+    with _refresh_thread_lock:
+        if _refresh_thread_started:
+            return
+        threading.Thread(target=_bg_refresh, daemon=True).start()
+        _refresh_thread_started = True
 
 def get_context():
     if not _cache["content"]:
@@ -561,7 +570,7 @@ async function call(endpoint,data,outId,btnId,label){
       out.textContent='Error: '+(j.error || 'Request could not be processed.');
       return;
     }
-    out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
+    out.textContent='Step 3/3: Result ready ✅\\n\\n'+(j.result || 'Could not generate result.');
     lastAnswers[outId]=j.result || '';
     ensureFollowupBox(outId);
   }catch(e){
@@ -613,7 +622,7 @@ function followup(outId,inputId,btnId){
   const q=((el && el.value) || '').trim();
   if(!q) return;
   const previous=lastAnswers[outId] || '';
-  const prompt='Previous answer:\n'+previous+'\n\nFollow-up question:\n'+q+'\n\nPlease explain more clearly, step by step, with examples.';
+  const prompt='Previous answer:\\n'+previous+'\\n\\nFollow-up question:\\n'+q+'\\n\\nPlease explain more clearly, step by step, with examples.';
   call('/ask',{question:prompt},outId,btnId,'Ask Follow-up');
 }
 
@@ -638,10 +647,12 @@ async function sendFeedback(){
 </html>"""# ─── ROUTES ──────────────────────────────────────────
 @app.route('/')
 def index():
+    ensure_bg_refresh_started()
     return render_template_string(HTML)
 
 @app.route('/healthz')
 def healthz():
+    ensure_bg_refresh_started()
     return jsonify(
         status='ok',
         ai_provider='vertex_ai_gemini',
@@ -770,4 +781,5 @@ def do_feedback():
     return jsonify(result='Thank you! Your feedback has been received and added to the improvement list.', total_feedback=len(_feedback_store))
 
 if __name__ == '__main__':
+    ensure_bg_refresh_started()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
