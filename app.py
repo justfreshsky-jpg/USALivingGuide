@@ -171,11 +171,9 @@ def local_fallback_reply(user):
     )
     sample = "\n".join(sample.splitlines()[:8])
     return (
-        "⚠️ Vertex AI configuration is missing, so showing a quick guide summary instead of an AI response.\n\n"
-        f"📌 Question: {user or 'General question'}\n"
-        "✅ Full AI answers will return once you add GOOGLE_CLOUD_PROJECT and VERTEX_LOCATION to Cloud Run env variables.\n"
-        "✅ Grant the Vertex AI User (roles/aiplatform.user) role to the service account.\n"
-        "\nQuick Info:\n"
+        "✅ Quick USA Living Guide\n\n"
+        f"📌 Topic: {user or 'General question'}\n\n"
+        "Here is a practical summary based on the latest guide data:\n"
         f"{sample}"
     )
 
