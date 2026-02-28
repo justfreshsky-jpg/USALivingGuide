@@ -570,7 +570,7 @@ async function call(endpoint,data,outId,btnId,label){
       out.textContent='Error: '+(j.error || 'Request could not be processed.');
       return;
     }
-    out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
+    out.textContent='Step 3/3: Result ready ✅\\n\\n'+(j.result || 'Could not generate result.');
     lastAnswers[outId]=j.result || '';
     ensureFollowupBox(outId);
   }catch(e){
@@ -622,7 +622,7 @@ function followup(outId,inputId,btnId){
   const q=((el && el.value) || '').trim();
   if(!q) return;
   const previous=lastAnswers[outId] || '';
-  const prompt='Previous answer:\n'+previous+'\n\nFollow-up question:\n'+q+'\n\nPlease explain more clearly, step by step, with examples.';
+  const prompt='Previous answer:\\n'+previous+'\\n\\nFollow-up question:\\n'+q+'\\n\\nPlease explain more clearly, step by step, with examples.';
   call('/ask',{question:prompt},outId,btnId,'Ask Follow-up');
 }
 
