@@ -140,8 +140,11 @@ def _fetch_blog():
         if combined:
             _cache["content"] = combined[:6000]
             _cache["last"] = time.time()
+    except requests.RequestException as exc:
+        logger.warning("Blog fetch failed (%s); using fallback content", exc.__class__.__name__)
+        _cache["content"] = FALLBACK
     except Exception:
-        logger.exception("Blog fetch failed; using fallback content")
+        logger.exception("Blog fetch failed unexpectedly; using fallback content")
         _cache["content"] = FALLBACK
 
 def _bg_refresh():
@@ -643,7 +646,6 @@ textarea{resize:vertical;min-height:90px}
 </div>
 <script>
 function g(id){return document.getElementById(id).value;}
-const lastAnswers = {};
 function quickStart(tab){
   const target=document.getElementById(tab);
   if(!target) return;
@@ -685,82 +687,12 @@ async function call(endpoint,data,outId,btnId,label){
       return;
     }
     out.textContent='Step 3/3: Result ready ✅\\n\\n'+(j.result || 'Could not generate result.');
-    lastAnswers[outId]=j.result || '';
-    ensureFollowupBox(outId);
   }catch(e){
     out.textContent='Connection error: '+e.message;
   }finally{
     btn.disabled=false;
     btn.textContent=label;
   }
-}
-
-function ensureFollowupBox(outId){
-  const out=document.getElementById(outId);
-  const wrap=out && out.closest('.output-wrap');
-  if(!wrap) return;
-  const ns=wrap.nextElementSibling;
-  if(ns && ns.classList && ns.classList.contains('followup-wrap')) return;
-
-  const box=document.createElement('div');
-  box.className='followup-wrap';
-  box.style.marginTop='10px';
-
-  const topRow=document.createElement('div');
-  topRow.style.display='flex';
-  topRow.style.justifyContent='space-between';
-  topRow.style.alignItems='center';
-  topRow.style.marginBottom='6px';
-
-  const title=document.createElement('strong');
-  title.textContent='Dig deeper (follow-up question)';
-
-  const closeBtn=document.createElement('button');
-  closeBtn.type='button';
-  closeBtn.textContent='✖ Close';
-  closeBtn.style.border='1px solid #cbd5e1';
-  closeBtn.style.background='#fff';
-  closeBtn.style.borderRadius='8px';
-  closeBtn.style.padding='4px 8px';
-  closeBtn.style.cursor='pointer';
-  closeBtn.addEventListener('click', function(){
-    box.remove();
-  });
-
-  topRow.appendChild(title);
-  topRow.appendChild(closeBtn);
-
-  const field=document.createElement('div');
-  field.className='field';
-  const textarea=document.createElement('textarea');
-  textarea.id='fu-'+outId;
-  textarea.rows=2;
-  textarea.placeholder='Explain this part of the answer in more detail...';
-  field.appendChild(textarea);
-
-  const btn=document.createElement('button');
-  btn.type='button';
-  btn.id='fub-'+outId;
-  btn.className='btn';
-  btn.style.margin='6px 0 0';
-  btn.textContent='Ask Follow-up';
-  btn.addEventListener('click', function(){
-    followup(outId, textarea.id, btn.id);
-  });
-
-  box.appendChild(topRow);
-  box.appendChild(field);
-  box.appendChild(btn);
-  wrap.parentNode.insertBefore(box, wrap.nextSibling);
-}
-
-function followup(outId,inputId,btnId){
-  const el=document.getElementById(inputId);
-  const q=((el && el.value) || '').trim();
-  if(!q) return;
-  const previous=lastAnswers[outId] || '';
-  const prompt='Previous answer:\\n'+previous+'\\n\\nFollow-up question:\\n'+q+'\\n\\nPlease explain more clearly, step by step, with examples.';
-  call('/ask',{question:prompt},outId,btnId,'Ask Follow-up');
 }
 
 async function sendFeedback(){
