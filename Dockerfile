@@ -13,4 +13,4 @@ COPY app.py ./
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${PORT} app:app"]
+CMD ["sh", "-c", "gunicorn -b 0.0.0.0:${PORT} --workers 2 --threads 4 --preload app:app"]
