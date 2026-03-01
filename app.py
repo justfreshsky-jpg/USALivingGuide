@@ -1,6 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import re
 from collections import deque
 import requests
 import threading
@@ -165,16 +166,131 @@ def get_context():
 
 # ─── AI ─────────────────────────────────────────────
 def local_fallback_reply(user):
-    sample = "\n".join(
-        line for line in get_context().splitlines()
-        if line.strip() and line.strip() != "---"
-    )
-    sample = "\n".join(sample.splitlines()[:8])
+    raw_question = (user or 'General question').strip()
+
+    question = raw_question
+    cleanup_patterns = [
+        r"Income:\s*\$\s*(?:\.|$)",
+        r"State:\s*(?:\.|$)",
+        r"Visa:\s*(?:\.|$)",
+    ]
+    for pattern in cleanup_patterns:
+        question = re.sub(pattern, '', question, flags=re.IGNORECASE)
+    question = re.sub(r'\s+', ' ', question).strip(' .') or 'General question'
+    q = question.lower()
+
+    form_match = re.search(r"Form:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
+    visa_match = re.search(r"Visa:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
+    state_match = re.search(r"State:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
+    income_match = re.search(r"Income:\s*\$?\s*([0-9][0-9,]*)", raw_question, flags=re.IGNORECASE)
+
+    topic_guides = [
+        (
+            ['uber', 'lyft', 'rideshare', 'gig'],
+            [
+                'Start with driver signup: SSN, valid driver license, vehicle registration, and insurance.',
+                'Track every trip expense (gas, maintenance, phone, tolls) for tax deductions.',
+                'Expect year-end forms (1099-K/1099-NEC) and set aside tax money weekly.'
+            ],
+            [
+                'Create Uber/Lyft account and upload documents for approval.',
+                'Complete required background check and vehicle inspection.',
+                'Drive during peak hours and keep a weekly earnings + expense log.',
+            ],
+        ),
+        (
+            ['visa', 'f-1', 'j-1', 'h-1b', 'green card', 'opt', 'cpt'],
+            [
+                'Keep passport, I-94, and visa documents valid and stored in one folder.',
+                'Follow status-specific rules (F-1/J-1 work limits, H-1B employer restrictions).',
+                'Use official USCIS/State Department pages for forms and deadlines.'
+            ],
+            [
+                'Confirm your current status and expiration dates.',
+                'Prepare required forms and supporting documents before filing.',
+                'Book appointments early and keep receipt numbers for tracking.',
+            ],
+        ),
+        (
+            ['rent', 'housing', 'apartment', 'lease', 'landlord'],
+            [
+                'Search on trusted listing sites and compare commute + safety + total monthly cost.',
+                'Prepare ID, proof of income, and references before applying.',
+                'Read lease terms carefully (deposit, maintenance, renewal, penalties).'
+            ],
+            [
+                'Set your budget including utilities and internet.',
+                'Tour multiple units and document apartment condition before move-in.',
+                'Sign lease only after confirming all fees and move-out terms.',
+            ],
+        ),
+        (
+            ['tax', '1099', 'w-2', 'w-4', 'refund', 'irs'],
+            [
+                'Collect all forms first (W-2/1099/1098) before filing.',
+                'Use the correct filing status and include state return if required.',
+                'File before deadlines and keep PDF copies of all submissions.'
+            ],
+            [
+                'Create IRS account and gather identity/tax documents.',
+                'Prepare federal return, then state return, then submit.',
+                'Track refund status and respond quickly to IRS letters.',
+            ],
+        ),
+    ]
+
+    summary = [
+        'Use official government or provider websites for final verification.',
+        'Prepare your IDs/documents before starting applications.',
+        'Keep copies of every submission, receipt, and confirmation number.'
+    ]
+    checklist = [
+        'Define your exact goal + state (NJ/NY/etc.).',
+        'Gather required IDs and proofs first.',
+        'Complete the application and save confirmation records.',
+    ]
+
+    for keys, s_items, c_items in topic_guides:
+        if any(k in q for k in keys):
+            summary = s_items
+            checklist = c_items
+            break
+
+    if any(k in q for k in ['tax', 'w-4', 'w-2', '1099', 'refund', 'irs']):
+        form = form_match.group(1).strip() if form_match else 'tax filing'
+        visa = visa_match.group(1).strip() if visa_match else 'your visa category'
+        state = state_match.group(1).strip() if state_match else 'your state'
+        income = income_match.group(1).strip() if income_match else 'your annual income'
+        if not state or state == '.':
+            state = 'your state'
+
+        summary = [
+            f'For {form}, first verify whether you need only federal filing or both federal + {state} filing.',
+            f'With {visa}, check treaty benefits and filing status before submitting returns.',
+            f'Estimate withholding/refund using {income} and keep payroll/tax documents together.'
+        ]
+        checklist = [
+            'Collect W-2/1099 statements, prior return (if any), and ID documents.',
+            'Prepare federal return first, then state return, and review numbers twice before filing.',
+            'Save PDF copies + confirmations and track refund status after submission.',
+        ]
+
+    summary_block = '\n'.join(f"- {item}" for item in summary)
+    checklist_block = '\n'.join(f"✅ {idx+1}. {item}" for idx, item in enumerate(checklist))
+
     return (
-        "✅ Quick USA Living Guide\n\n"
-        f"📌 Topic: {user or 'General question'}\n\n"
-        "Here is a practical summary based on the latest guide data:\n"
-        f"{sample}"
+        "✅ Quick USA Living Guide (Offline Mode)\n\n"
+        f"📌 Question: {question}\n\n"
+        "1) Quick Summary\n"
+        f"{summary_block}\n\n"
+        "2) Step-by-Step Checklist\n"
+        f"{checklist_block}\n\n"
+        "3) Common Mistakes / Risks\n"
+        "- Missing required IDs/documents before appointments\n"
+        "- Using unofficial sources instead of government/provider websites\n"
+        "- Waiting until deadlines for tax/visa/license actions\n\n"
+        "4) Next Step\n"
+        "- Share your STATE + timeline and I will generate a tighter checklist."
     )
 
 def llm(system, user):
@@ -590,18 +706,40 @@ function ensureFollowupBox(outId){
   box.className='followup-wrap';
   box.style.marginTop='10px';
 
+  const topRow=document.createElement('div');
+  topRow.style.display='flex';
+  topRow.style.justifyContent='space-between';
+  topRow.style.alignItems='center';
+  topRow.style.marginBottom='6px';
+
+  const title=document.createElement('strong');
+  title.textContent='Dig deeper (follow-up question)';
+
+  const closeBtn=document.createElement('button');
+  closeBtn.type='button';
+  closeBtn.textContent='✖ Close';
+  closeBtn.style.border='1px solid #cbd5e1';
+  closeBtn.style.background='#fff';
+  closeBtn.style.borderRadius='8px';
+  closeBtn.style.padding='4px 8px';
+  closeBtn.style.cursor='pointer';
+  closeBtn.addEventListener('click', function(){
+    box.remove();
+  });
+
+  topRow.appendChild(title);
+  topRow.appendChild(closeBtn);
+
   const field=document.createElement('div');
   field.className='field';
-  const label=document.createElement('label');
-  label.textContent='Dig deeper (follow-up question)';
   const textarea=document.createElement('textarea');
   textarea.id='fu-'+outId;
   textarea.rows=2;
   textarea.placeholder='Explain this part of the answer in more detail...';
-  field.appendChild(label);
   field.appendChild(textarea);
 
   const btn=document.createElement('button');
+  btn.type='button';
   btn.id='fub-'+outId;
   btn.className='btn';
   btn.style.margin='6px 0 0';
@@ -610,6 +748,7 @@ function ensureFollowupBox(outId){
     followup(outId, textarea.id, btn.id);
   });
 
+  box.appendChild(topRow);
   box.appendChild(field);
   box.appendChild(btn);
   wrap.parentNode.insertBefore(box, wrap.nextSibling);
