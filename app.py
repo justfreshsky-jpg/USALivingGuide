@@ -2,27 +2,26 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import re
+import unicodedata
 from collections import deque
 import requests
 import threading
 import time
 from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, make_response
 
 # ─── LOGGING ────────────────────────────────────────────────
-_log_dir = os.environ.get('LOG_DIR', 'logs')
-os.makedirs(_log_dir, exist_ok=True)
-_log_file = os.path.join(_log_dir, 'app.log')
+_log_handlers = [logging.StreamHandler()]
+_log_dir = os.environ.get('LOG_DIR', '')
+if _log_dir:
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_file = os.path.join(_log_dir, 'app.log')
+    _log_handlers.append(RotatingFileHandler(_log_file, maxBytes=5 * 1024 * 1024, backupCount=3))
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
-    handlers=[
-        RotatingFileHandler(
-            _log_file, maxBytes=5 * 1024 * 1024, backupCount=3
-        ),
-        logging.StreamHandler(),
-    ],
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 
@@ -31,33 +30,38 @@ GOOGLE_CLOUD_PROJECT = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get(
 VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
 _token_cache = {'value': '', 'expires_at': 0}
+_token_lock = threading.Lock()
 
 def get_access_token():
     now = time.time()
-    if _token_cache['value'] and _token_cache['expires_at'] > now:
-        return _token_cache['value']
+    with _token_lock:
+        if _token_cache['value'] and _token_cache['expires_at'] > now:
+            return _token_cache['value']
 
-    env_token = os.environ.get('GOOGLE_OAUTH_ACCESS_TOKEN')
-    if env_token:
-        _token_cache['value'] = env_token
-        _token_cache['expires_at'] = now + 3300
-        return env_token
+        env_token = os.environ.get('GOOGLE_OAUTH_ACCESS_TOKEN')
+        if env_token:
+            _token_cache['value'] = env_token
+            _token_cache['expires_at'] = now + 3300
+            return env_token
 
     metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token'
     try:
         r = requests.get(metadata_url, headers={'Metadata-Flavor': 'Google'}, timeout=(1.5, 2.0))
         if not r.ok:
+            logger.warning("Metadata server returned status %s", r.status_code)
             return ''
         data = r.json()
         token = data.get('access_token', '')
         expires_in = max(30, int(data.get('expires_in', 300)) - 30)
-        _token_cache['value'] = token
-        _token_cache['expires_at'] = now + expires_in
+        with _token_lock:
+            _token_cache['value'] = token
+            _token_cache['expires_at'] = now + expires_in
         return token
     except Exception:
+        logger.warning("Failed to fetch access token from metadata server", exc_info=True)
         return ''
 
-def call_vertex(prompt):
+def call_vertex(system_prompt, user_prompt):
     if not GOOGLE_CLOUD_PROJECT:
         return ''
 
@@ -71,7 +75,8 @@ def call_vertex(prompt):
         f"publishers/google/models/{GEMINI_MODEL}:generateContent"
     )
     payload = {
-        'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
+        'systemInstruction': {'parts': [{'text': system_prompt}]},
+        'contents': [{'role': 'user', 'parts': [{'text': user_prompt}]}],
         'generationConfig': {'maxOutputTokens': 2000, 'temperature': 0.6}
     }
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
@@ -79,15 +84,18 @@ def call_vertex(prompt):
     try:
         r = requests.post(endpoint, headers=headers, json=payload, timeout=(3, 30))
     except Exception:
+        logger.warning("POST request to Vertex AI failed", exc_info=True)
         return ''
 
     if not r.ok:
+        logger.warning("Vertex AI returned status %s: %s", r.status_code, r.text[:200])
         return ''
 
     try:
         data = r.json()
         return data['candidates'][0]['content']['parts'][0]['text']
     except Exception:
+        logger.warning("Failed to parse Vertex AI response JSON", exc_info=True)
         return ''
 
 
@@ -149,7 +157,10 @@ def _fetch_blog():
 
 def _bg_refresh():
     while True:
-        _fetch_blog()
+        try:
+            _fetch_blog()
+        except Exception:
+            logger.exception("Unexpected error in background blog refresh")
         time.sleep(3600)
 
 def ensure_bg_refresh_started():
@@ -296,6 +307,15 @@ def local_fallback_reply(user):
         "- Share your STATE + timeline and I will generate a tighter checklist."
     )
 
+def _clean_ai_text(text):
+    """Remove markdown bold and filter to safe Unicode characters."""
+    text = text.replace('**', '')
+    cleaned = []
+    for c in text:
+        if ord(c) < 128 or unicodedata.category(c).startswith(('L', 'M', 'N', 'P', 'S', 'Z')):
+            cleaned.append(c)
+    return ''.join(cleaned).strip()
+
 def llm(system, user):
     if not GOOGLE_CLOUD_PROJECT:
         return local_fallback_reply(user)
@@ -317,17 +337,11 @@ def llm(system, user):
 
     full_system = system + "\n\n" + usa_prompt + "\n\nReference data:\n" + get_context()
 
-    text = call_vertex(f"{full_system}\n\nUser question:\n{user}")
+    text = call_vertex(system_prompt=full_system, user_prompt=user)
     if not text:
         return local_fallback_reply(user)
-    text = text.replace('**', '')
 
-    text = ''.join(c for c in text
-                   if (ord(c) < 128 or
-                       0x1F600 <= ord(c) <= 0x1F64F or
-                       0x1F300 <= ord(c) <= 0x1F5FF))
-
-    return text.strip()
+    return _clean_ai_text(text)
 
 
 class BadRequestError(Exception):
@@ -471,9 +485,9 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">🎯 <strong>For newcomers:</strong> Start with J-1, switch to H-1B once you find a job.</div>
     <div class="form-row">
       <div class="field"><label>Visa Type</label><select id="v1"><option>J-1 Student</option><option>H-1B Work</option><option>E-2 Investor</option><option>Green Card (EB)</option><option>F-1 Student</option><option>Visitor B-2</option></select></div>
-      <div class="field"><label>State</label><input id="v2" placeholder="e.g. New Jersey"></div>
+      <div class="field"><label>State</label><input id="v2" placeholder="e.g. New Jersey" maxlength="2000"></div>
     </div>
-    <div class="field"><label>Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied"></div>
+    <div class="field"><label>Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
     <button type="button" class="btn" id="vb" data-action="visa">Generate Visa Plan</button>
     <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="vo">Copy</button></div>
   </div></div>
@@ -487,7 +501,7 @@ textarea{resize:vertical;min-height:90px}
     </div>
     <div class="form-row">
       <div class="field"><label>Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
-      <div class="field"><label>State</label><input id="t4" placeholder="New Jersey"></div>
+      <div class="field"><label>State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
     </div>
     <button type="button" class="btn" id="tb" data-action="tax">Generate Tax Checklist</button>
     <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
@@ -498,7 +512,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">🚗 <strong>For newcomers:</strong> License + car + SSN is enough. $800-1500/week.</div>
     <div class="form-row">
       <div class="field"><label>App</label><select id="r1"><option>Uber</option><option>Lyft</option><option>Both</option></select></div>
-      <div class="field"><label>State</label><input id="r2" placeholder="New Jersey"></div>
+      <div class="field"><label>State</label><input id="r2" placeholder="New Jersey" maxlength="2000"></div>
     </div>
     <div class="field"><label>Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
     <button type="button" class="btn" id="rb" data-action="rideshare">Generate Plan</button>
@@ -509,10 +523,10 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-home"></i> Apartment Rental</h2>
     <div class="hint">🏠 <strong>Tip:</strong> NJ Newark/Paterson 1BR $900-1200. Try Craigslist and Zillow.</div>
     <div class="form-row">
-      <div class="field"><label>City / Area</label><input id="e1" placeholder="e.g. Newark NJ, Jersey City"></div>
+      <div class="field"><label>City / Area</label><input id="e1" placeholder="e.g. Newark NJ, Jersey City" maxlength="2000"></div>
       <div class="field"><label>Budget ($/month)</label><input id="e2" type="number" placeholder="1200"></div>
     </div>
-    <div class="field"><label>Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets"></div>
+    <div class="field"><label>Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets" maxlength="2000"></div>
     <button type="button" class="btn" id="eb" data-action="housing">Generate Plan</button>
     <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="eo">Copy</button></div>
   </div></div>
@@ -521,7 +535,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-heartbeat"></i> Free Health Insurance</h2>
     <div class="hint">🏥 <strong>Tip:</strong> Medicaid is free in NJ for low income. Some clinics don't require documents.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="h1" placeholder="New Jersey"></div>
+      <div class="field"><label>State</label><input id="h1" placeholder="New Jersey" maxlength="2000"></div>
       <div class="field"><label>Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="hb" data-action="health">Generate Guide</button>
@@ -532,7 +546,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-id-card"></i> Driver's License (DMV)</h2>
     <div class="hint">🪪 <strong>Tip:</strong> NJ has the 6 Points of ID system. Even undocumented can get a license.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="l1" placeholder="New Jersey"></div>
+      <div class="field"><label>State</label><input id="l1" placeholder="New Jersey" maxlength="2000"></div>
       <div class="field"><label>Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
     </div>
     <button type="button" class="btn" id="lb" data-action="license">Generate Guide</button>
@@ -557,12 +571,12 @@ textarea{resize:vertical;min-height:90px}
       </div>
       <div class="field">
         <label>State</label>
-        <input id="ss2" placeholder="New Jersey">
+        <input id="ss2" placeholder="New Jersey" maxlength="2000">
       </div>
     </div>
     <div class="field">
       <label>Situation</label>
-      <input id="ss3" placeholder="e.g. CPT approved, waiting for OPT, do I need ITIN?">
+      <input id="ss3" placeholder="e.g. CPT approved, waiting for OPT, do I need ITIN?" maxlength="2000">
     </div>
     <button type="button" class="btn" id="ssb" data-action="ssn">Generate SSN Guide</button>
     <div class="output-wrap">
@@ -592,7 +606,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-car-side"></i> Car Rental / Purchase</h2>
     <div class="hint">🚗 <strong>Tip:</strong> You can buy a car without SSN. Start with CarMax/Carvana.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="ar1" placeholder="New Jersey"></div>
+      <div class="field"><label>State</label><input id="ar1" placeholder="New Jersey" maxlength="2000"></div>
       <div class="field"><label>Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="arb" data-action="car">Generate Guide</button>
@@ -621,7 +635,7 @@ textarea{resize:vertical;min-height:90px}
   <div id="ask" class="tab"><div class="card">
     <h2><i class="fas fa-question-circle"></i> Ask Any Question</h2>
     <div class="hint">🤖 Ask anything about life in the USA. You'll get a detailed answer.</div>
-    <div class="field"><label>What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?"></textarea></div>
+    <div class="field"><label>What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?" maxlength="2000"></textarea></div>
     <button type="button" class="btn" id="qb" data-action="ask">Answer</button>
     <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button type="button" class="copy-btn" data-copy-target="qo">Copy</button></div>
   </div></div>
@@ -629,15 +643,15 @@ textarea{resize:vertical;min-height:90px}
   <div id="feedback" class="tab"><div class="card">
     <h2><i class="fas fa-comment-dots"></i> Site Feedback</h2>
     <div class="hint">💬 Share your experience: what worked, what's missing, what should we improve?</div>
-    <div class="field"><label>Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..."></textarea></div>
-    <div class="field"><label>Optional Email</label><input id="fb2" placeholder="name@example.com"></div>
+    <div class="field"><label>Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..." maxlength="2000"></textarea></div>
+    <div class="field"><label>Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
     <button type="button" class="btn" id="fbb" data-action="feedback">Submit Feedback</button>
     <div class="output-wrap"><div id="fbo" class="output">Feedback status message will appear here...</div></div>
   </div></div>
 
 </div>
 <div class="footer">
-  No personal data is stored<br>
+  Feedback data is stored in memory only and cleared on restart<br>
   <span style="font-size:.8em;color:#94a3b8">
     ⚠️ This tool is for informational purposes only. AI may make mistakes.
     For legal, financial, or medical matters, always consult a professional.
@@ -686,7 +700,7 @@ async function call(endpoint,data,outId,btnId,label){
       out.textContent='Error: '+(j.error || 'Request could not be processed.');
       return;
     }
-    out.textContent='Step 3/3: Result ready ✅\\n\\n'+(j.result || 'Could not generate result.');
+    out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
   }catch(e){
     out.textContent='Connection error: '+e.message;
   }finally{
@@ -752,18 +766,16 @@ document.addEventListener('DOMContentLoaded', () => {
 @app.route('/')
 def index():
     ensure_bg_refresh_started()
-    return render_template_string(HTML)
+    response = make_response(HTML)
+    response.headers['Content-Type'] = 'text/html'
+    return response
 
 @app.route('/healthz')
 def healthz():
     ensure_bg_refresh_started()
     return jsonify(
         status='ok',
-        ai_provider='vertex_ai_gemini',
-        vertex_configured=bool(GOOGLE_CLOUD_PROJECT and get_access_token()),
-        project=GOOGLE_CLOUD_PROJECT,
-        location=VERTEX_LOCATION,
-        model=GEMINI_MODEL
+        vertex_configured=bool(GOOGLE_CLOUD_PROJECT and get_access_token())
     )
 
 @app.route('/visa', methods=['POST'])
@@ -877,13 +889,18 @@ _feedback_store = deque(maxlen=500)
 @app.route('/feedback', methods=['POST'])
 def do_feedback():
     d = require_json(['message'])
+    message = d.get('message', '').strip()
+    if not message:
+        raise BadRequestError("Message cannot be empty.")
     _feedback_store.append({
-        'message': d.get('message', '').strip(),
+        'message': message,
         'contact': d.get('contact', '').strip(),
         'ts': int(time.time())
     })
-    return jsonify(result='Thank you! Your feedback has been received and added to the improvement list.', total_feedback=len(_feedback_store))
+    return jsonify(result='Thank you! Your feedback has been received.')
+
+# Ensure background refresh starts on import (for gunicorn)
+ensure_bg_refresh_started()
 
 if __name__ == '__main__':
-    ensure_bg_refresh_started()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
