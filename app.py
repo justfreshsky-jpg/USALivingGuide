@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -30,6 +31,7 @@ app = Flask(__name__)
 GOOGLE_CLOUD_PROJECT = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
 VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
+MAX_OUTPUT_TOKENS = int(os.environ.get('MAX_OUTPUT_TOKENS', 2048))
 _token_cache = {'value': '', 'expires_at': 0}
 _token_lock = threading.Lock()
 
@@ -40,7 +42,6 @@ _response_cache: 'OrderedDict[str, tuple]' = OrderedDict()
 _response_cache_lock = threading.Lock()
 
 def _cache_key(system: str, user: str) -> str:
-    import json
     return hashlib.sha256(json.dumps([system, user], ensure_ascii=False).encode()).hexdigest()
 
 def _response_cache_get(key: str):
@@ -111,6 +112,7 @@ def add_security_headers(response):
 
 def get_access_token():
     now = time.time()
+    metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token'
     with _token_lock:
         if _token_cache['value'] and _token_cache['expires_at'] > now:
             return _token_cache['value']
@@ -121,7 +123,6 @@ def get_access_token():
             _token_cache['expires_at'] = now + 3300
             return env_token
 
-    metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token'
     try:
         r = requests.get(metadata_url, headers={'Metadata-Flavor': 'Google'}, timeout=(1.5, 2.0))
         if not r.ok:
@@ -154,7 +155,7 @@ def call_vertex(system_prompt, user_prompt):
     payload = {
         'systemInstruction': {'parts': [{'text': system_prompt}]},
         'contents': [{'role': 'user', 'parts': [{'text': user_prompt}]}],
-        'generationConfig': {'maxOutputTokens': 2000, 'temperature': 0.6}
+        'generationConfig': {'maxOutputTokens': MAX_OUTPUT_TOKENS, 'temperature': 0.6}
     }
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
 
@@ -223,29 +224,33 @@ def _fetch_blog():
         ]
         combined = ""
         for url in urls:
-            r = requests.get(url, headers=headers, timeout=8)
-            if not r.ok:
-                logger.warning("Blog fetch returned status %s for %s", r.status_code, url)
-                continue
-            soup = BeautifulSoup(r.text, "html.parser")
-            for tag in soup(["script", "style", "nav", "header", "footer"]):
-                tag.decompose()
-            posts = soup.find_all("div", class_=lambda c: c and "post" in c.lower())
-            for p in posts[:15]:
-                text = p.get_text(separator=" ", strip=True)
-                if len(text) > 100:
-                    combined += text[:800] + "\n---\n"
+            try:
+                r = requests.get(url, headers=headers, timeout=8)
+                if not r.ok:
+                    logger.warning("Blog fetch returned status %s for %s", r.status_code, url)
+                    continue
+                soup = BeautifulSoup(r.text, "html.parser")
+                for tag in soup(["script", "style", "nav", "header", "footer"]):
+                    tag.decompose()
+                posts = soup.find_all("div", class_=lambda c: c and "post" in c.lower())
+                for p in posts[:15]:
+                    text = p.get_text(separator=" ", strip=True)
+                    if len(text) > 100:
+                        combined += text[:800] + "\n---\n"
+            except requests.RequestException as exc:
+                logger.warning("Blog fetch failed for %s (%s)", url, exc.__class__.__name__)
         if combined:
             _blog_cache["content"] = combined[:6000]
             _blog_cache["last"] = time.time()
-    except requests.RequestException as exc:
-        logger.warning("Blog fetch failed (%s); using fallback content", exc.__class__.__name__)
-        _blog_cache["content"] = FALLBACK
+        elif not _blog_cache["content"]:
+            _blog_cache["content"] = FALLBACK
     except Exception:
         logger.exception("Blog fetch failed unexpectedly; using fallback content")
-        _blog_cache["content"] = FALLBACK
+        if not _blog_cache["content"]:
+            _blog_cache["content"] = FALLBACK
 
 def _bg_refresh():
+    time.sleep(5)  # brief delay to avoid blocking Gunicorn worker startup
     while True:
         try:
             _fetch_blog()
@@ -402,7 +407,7 @@ def local_fallback_reply(user):
 
 def _clean_ai_text(text):
     """Remove markdown formatting and filter to safe Unicode characters."""
-    text = text.replace('**', '')
+    text = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text)
     # Strip leading # header markers from lines
     text = re.sub(r'(?m)^#+\s*', '', text)
     # Normalize excessive blank lines (3+ newlines → 2)
@@ -432,12 +437,12 @@ def llm(system, user):
     ⚠️ USA / NJ / NY ONLY!
     """
 
-    full_system = system + "\n\n" + usa_prompt + "\n\nReference data:\n" + get_context()
-
-    key = _cache_key(full_system, user)
+    key = _cache_key(system, user)
     cached = _response_cache_get(key)
     if cached is not None:
         return cached
+
+    full_system = system + "\n\n" + usa_prompt + "\n\nReference data:\n" + get_context()
 
     text = call_vertex(system_prompt=full_system, user_prompt=user)
     if not text:
@@ -495,8 +500,9 @@ HTML = """<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Segoe UI,Arial,sans-serif;background:#f0f4ff;color:#1e293b}
-.hero{background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;padding:40px 20px;text-align:center}
-.hero h1{font-size:2.2em;font-weight:800;margin-bottom:10px}
+.hero{background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;padding:48px 24px;text-align:center}
+.hero h1{font-size:2.2em;font-weight:800;margin-bottom:10px;letter-spacing:-0.5px}
+.hero h1 a{color:inherit;text-decoration:none}
 .hero p{font-size:1.1em;opacity:.9;max-width:600px;margin:0 auto 16px}
 .steps{display:flex;justify-content:center;flex-wrap:wrap;gap:10px;margin-top:12px}
 .step{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:20px;padding:6px 16px;font-size:.9em}
@@ -517,7 +523,8 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#f0f4ff;color:#1e293b}
 .tab{display:none}
 .tab.active{display:block;animation:fadeIn .4s}
 @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-.card{background:#fff;border-radius:16px;padding:28px;box-shadow:0 4px 20px rgba(0,0,0,.08)}
+.card{background:#fff;border-radius:16px;padding:28px;box-shadow:0 2px 12px rgba(30,58,138,0.08);transition:box-shadow .2s}
+.card:hover{box-shadow:0 8px 32px rgba(30,58,138,0.12)}
 .card h2{color:#1e3a8a;font-size:1.5em;margin-bottom:12px;display:flex;align-items:center;gap:10px}
 .hint{background:#f0f9ff;border-left:4px solid #10b981;padding:14px 16px;border-radius:0 10px 10px 0;margin-bottom:20px;font-size:.9em;color:#0f4c75}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
@@ -536,16 +543,16 @@ textarea{resize:vertical;min-height:90px}
 .output.loading{animation:pulse 1.5s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .copy-btn{position:absolute;top:10px;right:10px;background:#10b981;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;opacity:0;transition:opacity .2s}
-.output-wrap:hover .copy-btn{opacity:1}
+.output-wrap:hover .copy-btn,.output-wrap:focus-within .copy-btn{opacity:1}
 @media(hover:none){.copy-btn{opacity:1}}
 .spinner{display:inline-block;width:16px;height:16px;border:3px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.trust-row{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 10px}.trust-chip{background:#fff;border:1px solid #dbeafe;color:#1e3a8a;padding:8px 12px;border-radius:999px;font-size:.82em;font-weight:600}.goal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:8px 0 18px}.goal-card{background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:12px;cursor:pointer;transition:.2s}.goal-card:hover{border-color:#3b82f6;transform:translateY(-2px)}.goal-card h4{font-size:.95em;color:#1e3a8a;margin-bottom:4px}.goal-card p{font-size:.8em;color:#64748b}.hero-cta{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:14px}.hero-cta button{background:#fff;color:#1e3a8a;border:none;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}.footer{text-align:center;padding:32px 20px;color:#64748b;font-size:.88em;line-height:2;background:#fff;margin-top:20px;border-radius:16px}.char-count{font-size:.8em;color:#94a3b8;text-align:right;margin-top:2px}
+.trust-row{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 10px}.trust-chip{background:#fff;border:1px solid #dbeafe;color:#1e3a8a;padding:8px 12px;border-radius:999px;font-size:.82em;font-weight:600}.goal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:8px 0 18px}.goal-card{background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:12px;cursor:pointer;transition:.2s}.goal-card:hover{border-color:#3b82f6;transform:translateY(-2px)}.goal-card h4{font-size:.95em;color:#1e3a8a;margin-bottom:4px}.goal-card p{font-size:.8em;color:#64748b}.hero-cta{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:14px}.hero-cta button{background:rgba(255,255,255,0.15);color:#fff;border:1px solid rgba(255,255,255,0.4);padding:10px 18px;border-radius:10px;font-weight:700;cursor:pointer;transition:background .2s}.hero-cta button:hover{background:rgba(255,255,255,0.28)}.footer{text-align:center;padding:32px 20px;color:#475569;font-size:.88em;line-height:2;background:#fff;margin-top:20px;border-radius:16px}.char-count{font-size:.8em;color:#94a3b8;text-align:right;margin-top:2px}
 </style>
 </head>
 <body>
 <div class="hero">
-  <h1>🇺🇸 USA Living Guide</h1>
+  <h1><a href="/">🇺🇸 USA Living Guide</a></h1>
   <p>Create your personal roadmap for your first 30 days in the USA in 2-3 minutes.</p>
   <div class="steps">
     <span class="step">1️⃣ Pick a Topic</span>
@@ -573,103 +580,103 @@ textarea{resize:vertical;min-height:90px}
     <div class="goal-card" data-quickstart="housing"><h4>Rent an Apartment</h4><p>Budget + lease checklist</p></div>
     <div class="goal-card" data-quickstart="tax"><h4>Tax Guide</h4><p>Forms + deadline summary</p></div>
   </div>
-  <div class="tabs" id="topicTabs" role="tablist">
-    <button type="button" class="active" data-tab="visa" role="tab" aria-selected="true" aria-controls="visa"><i class="fas fa-passport"></i>Visa</button>
-    <button type="button" data-tab="tax" role="tab" aria-selected="false" aria-controls="tax"><i class="fas fa-calculator"></i>Tax</button>
-    <button type="button" data-tab="rideshare" role="tab" aria-selected="false" aria-controls="rideshare"><i class="fas fa-car"></i>Gig Work</button>
-    <button type="button" data-tab="housing" role="tab" aria-selected="false" aria-controls="housing"><i class="fas fa-home"></i>Housing</button>
-    <button type="button" data-tab="health" role="tab" aria-selected="false" aria-controls="health"><i class="fas fa-heartbeat"></i>Health</button>
-    <button type="button" data-tab="license" role="tab" aria-selected="false" aria-controls="license"><i class="fas fa-id-card"></i>License</button>
-    <button type="button" data-tab="ssn" role="tab" aria-selected="false" aria-controls="ssn"><i class="fas fa-id-card-alt"></i>SSN</button>
-    <button type="button" data-tab="bank" role="tab" aria-selected="false" aria-controls="bank"><i class="fas fa-university"></i>Bank</button>
-    <button type="button" data-tab="phone" role="tab" aria-selected="false" aria-controls="phone"><i class="fas fa-phone"></i>Phone</button>
-    <button type="button" data-tab="car" role="tab" aria-selected="false" aria-controls="car"><i class="fas fa-car-side"></i>Car</button>
-    <button type="button" data-tab="transfer" role="tab" aria-selected="false" aria-controls="transfer"><i class="fas fa-exchange-alt"></i>Money Transfer</button>
-    <button type="button" data-tab="flights" role="tab" aria-selected="false" aria-controls="flights"><i class="fas fa-plane"></i>Flights</button>
-    <button type="button" data-tab="ask" role="tab" aria-selected="false" aria-controls="ask"><i class="fas fa-question-circle"></i>Ask</button>
-    <button type="button" data-tab="feedback" role="tab" aria-selected="false" aria-controls="feedback"><i class="fas fa-comment-dots"></i>Feedback</button>
+  <div class="tabs" id="topicTabs" role="tablist" aria-orientation="horizontal">
+    <button type="button" id="tab-btn-visa" class="active" data-tab="visa" role="tab" aria-selected="true" aria-controls="visa"><i class="fas fa-passport"></i>Visa</button>
+    <button type="button" id="tab-btn-tax" data-tab="tax" role="tab" aria-selected="false" aria-controls="tax"><i class="fas fa-calculator"></i>Tax</button>
+    <button type="button" id="tab-btn-rideshare" data-tab="rideshare" role="tab" aria-selected="false" aria-controls="rideshare"><i class="fas fa-car"></i>Gig Work</button>
+    <button type="button" id="tab-btn-housing" data-tab="housing" role="tab" aria-selected="false" aria-controls="housing"><i class="fas fa-home"></i>Housing</button>
+    <button type="button" id="tab-btn-health" data-tab="health" role="tab" aria-selected="false" aria-controls="health"><i class="fas fa-heartbeat"></i>Health</button>
+    <button type="button" id="tab-btn-license" data-tab="license" role="tab" aria-selected="false" aria-controls="license"><i class="fas fa-id-card"></i>License</button>
+    <button type="button" id="tab-btn-ssn" data-tab="ssn" role="tab" aria-selected="false" aria-controls="ssn"><i class="fas fa-id-card-alt"></i>SSN</button>
+    <button type="button" id="tab-btn-bank" data-tab="bank" role="tab" aria-selected="false" aria-controls="bank"><i class="fas fa-university"></i>Bank</button>
+    <button type="button" id="tab-btn-phone" data-tab="phone" role="tab" aria-selected="false" aria-controls="phone"><i class="fas fa-phone"></i>Phone</button>
+    <button type="button" id="tab-btn-car" data-tab="car" role="tab" aria-selected="false" aria-controls="car"><i class="fas fa-car-side"></i>Car</button>
+    <button type="button" id="tab-btn-transfer" data-tab="transfer" role="tab" aria-selected="false" aria-controls="transfer"><i class="fas fa-exchange-alt"></i>Money Transfer</button>
+    <button type="button" id="tab-btn-flights" data-tab="flights" role="tab" aria-selected="false" aria-controls="flights"><i class="fas fa-plane"></i>Flights</button>
+    <button type="button" id="tab-btn-ask" data-tab="ask" role="tab" aria-selected="false" aria-controls="ask"><i class="fas fa-question-circle"></i>Ask</button>
+    <button type="button" id="tab-btn-feedback" data-tab="feedback" role="tab" aria-selected="false" aria-controls="feedback"><i class="fas fa-comment-dots"></i>Feedback</button>
   </div>
 
-  <div id="visa" class="tab active"><div class="card">
+  <div id="visa" class="tab active" role="tabpanel" aria-labelledby="tab-btn-visa"><div class="card">
     <h2><i class="fas fa-passport"></i> Visa & Green Card</h2>
     <div class="hint">🎯 <strong>For newcomers:</strong> Start with J-1, switch to H-1B once you find a job.</div>
     <div class="form-row">
-      <div class="field"><label>Visa Type</label><select id="v1"><option>J-1 Student</option><option>H-1B Work</option><option>E-2 Investor</option><option>Green Card (EB)</option><option>F-1 Student</option><option>Visitor B-2</option></select></div>
-      <div class="field"><label>State</label><input id="v2" placeholder="e.g. New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="v1">Visa Type</label><select id="v1"><option>J-1 Student</option><option>H-1B Work</option><option>E-2 Investor</option><option>Green Card (EB)</option><option>F-1 Student</option><option>Visitor B-2</option></select></div>
+      <div class="field"><label for="v2">State</label><input id="v2" placeholder="e.g. New Jersey" maxlength="2000"></div>
     </div>
-    <div class="field"><label>Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
+    <div class="field"><label for="v3">Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
     <button type="button" class="btn" id="vb" data-action="visa">Generate Visa Plan</button>
-    <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="vo">Copy</button></div>
+    <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="vo">Copy</button></div>
   </div></div>
 
-  <div id="tax" class="tab"><div class="card">
+  <div id="tax" class="tab" role="tabpanel" aria-labelledby="tab-btn-tax"><div class="card">
     <h2><i class="fas fa-calculator"></i> Tax Refund & Forms</h2>
     <div class="hint">💰 <strong>Tip:</strong> File 1040NR in your first year. Add 1099 if you do rideshare.</div>
     <div class="form-row">
-      <div class="field"><label>Form Type</label><select id="t1"><option>W-4 (Payroll)</option><option>1040NR (International)</option><option>1099-K (Rideshare)</option><option>W-2 (Employee)</option></select></div>
-      <div class="field"><label>Annual Income ($)</label><input id="t2" type="number" placeholder="e.g. 35000"></div>
+      <div class="field"><label for="t1">Form Type</label><select id="t1"><option>W-4 (Payroll)</option><option>1040NR (International)</option><option>1099-K (Rideshare)</option><option>W-2 (Employee)</option></select></div>
+      <div class="field"><label for="t2">Annual Income ($)</label><input id="t2" type="number" placeholder="e.g. 35000"></div>
     </div>
     <div class="form-row">
-      <div class="field"><label>Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
-      <div class="field"><label>State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="t3">Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
+      <div class="field"><label for="t4">State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
     </div>
     <button type="button" class="btn" id="tb" data-action="tax">Generate Tax Checklist</button>
-    <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
+    <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="to">Copy</button></div>
   </div></div>
 
-  <div id="rideshare" class="tab"><div class="card">
+  <div id="rideshare" class="tab" role="tabpanel" aria-labelledby="tab-btn-rideshare"><div class="card">
     <h2><i class="fas fa-car"></i> Earn with Uber / Lyft</h2>
     <div class="hint">🚗 <strong>For newcomers:</strong> License + car + SSN is enough. $800-1500/week.</div>
     <div class="form-row">
-      <div class="field"><label>App</label><select id="r1"><option>Uber</option><option>Lyft</option><option>Both</option></select></div>
-      <div class="field"><label>State</label><input id="r2" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="r1">App</label><select id="r1"><option>Uber</option><option>Lyft</option><option>Both</option></select></div>
+      <div class="field"><label for="r2">State</label><input id="r2" placeholder="New Jersey" maxlength="2000"></div>
     </div>
-    <div class="field"><label>Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
+    <div class="field"><label for="r3">Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
     <button type="button" class="btn" id="rb" data-action="rideshare">Generate Plan</button>
-    <div class="output-wrap"><div id="ro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ro">Copy</button></div>
+    <div class="output-wrap"><div id="ro" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="ro">Copy</button></div>
   </div></div>
 
-  <div id="housing" class="tab"><div class="card">
+  <div id="housing" class="tab" role="tabpanel" aria-labelledby="tab-btn-housing"><div class="card">
     <h2><i class="fas fa-home"></i> Apartment Rental</h2>
     <div class="hint">🏠 <strong>Tip:</strong> NJ Newark/Paterson 1BR $900-1200. Try Craigslist and Zillow.</div>
     <div class="form-row">
-      <div class="field"><label>City / Area</label><input id="e1" placeholder="e.g. Newark NJ, Jersey City" maxlength="2000"></div>
-      <div class="field"><label>Budget ($/month)</label><input id="e2" type="number" placeholder="1200"></div>
+      <div class="field"><label for="e1">City / Area</label><input id="e1" placeholder="e.g. Newark NJ, Jersey City" maxlength="2000"></div>
+      <div class="field"><label for="e2">Budget ($/month)</label><input id="e2" type="number" placeholder="1200"></div>
     </div>
-    <div class="field"><label>Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets" maxlength="2000"></div>
+    <div class="field"><label for="e3">Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets" maxlength="2000"></div>
     <button type="button" class="btn" id="eb" data-action="housing">Generate Plan</button>
-    <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="eo">Copy</button></div>
+    <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="eo">Copy</button></div>
   </div></div>
 
-  <div id="health" class="tab"><div class="card">
+  <div id="health" class="tab" role="tabpanel" aria-labelledby="tab-btn-health"><div class="card">
     <h2><i class="fas fa-heartbeat"></i> Free Health Insurance</h2>
     <div class="hint">🏥 <strong>Tip:</strong> Medicaid is free in NJ for low income. Some clinics don't require documents.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="h1" placeholder="New Jersey" maxlength="2000"></div>
-      <div class="field"><label>Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
+      <div class="field"><label for="h1">State</label><input id="h1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="h2">Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="hb" data-action="health">Generate Guide</button>
-    <div class="output-wrap"><div id="ho" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ho">Copy</button></div>
+    <div class="output-wrap"><div id="ho" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="ho">Copy</button></div>
   </div></div>
 
-  <div id="license" class="tab"><div class="card">
+  <div id="license" class="tab" role="tabpanel" aria-labelledby="tab-btn-license"><div class="card">
     <h2><i class="fas fa-id-card"></i> Driver's License (DMV)</h2>
     <div class="hint">🪪 <strong>Tip:</strong> NJ has the 6 Points of ID system. Even undocumented can get a license.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="l1" placeholder="New Jersey" maxlength="2000"></div>
-      <div class="field"><label>Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
+      <div class="field"><label for="l1">State</label><input id="l1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="l2">Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
     </div>
     <button type="button" class="btn" id="lb" data-action="license">Generate Guide</button>
-    <div class="output-wrap"><div id="lo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="lo">Copy</button></div>
+    <div class="output-wrap"><div id="lo" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="lo">Copy</button></div>
   </div></div>
 
-<div id="ssn" class="tab">
+<div id="ssn" class="tab" role="tabpanel" aria-labelledby="tab-btn-ssn">
   <div class="card">
     <h2><i class="fas fa-id-card-alt"></i> SSN Application Guide</h2>
     <div class="hint">🆔 <strong>For newcomers:</strong> F-1/J-1 students can get it with CPT/OPT. SSN is required for on-campus jobs.</div>
     <div class="form-row">
       <div class="field">
-        <label>Visa Type</label>
+        <label for="ss1">Visa Type</label>
         <select id="ss1">
           <option>F-1 Student (CPT/OPT)</option>
           <option>J-1 Student</option>
@@ -680,81 +687,81 @@ textarea{resize:vertical;min-height:90px}
         </select>
       </div>
       <div class="field">
-        <label>State</label>
+        <label for="ss2">State</label>
         <input id="ss2" placeholder="New Jersey" maxlength="2000">
       </div>
     </div>
     <div class="field">
-      <label>Situation</label>
+      <label for="ss3">Situation</label>
       <input id="ss3" placeholder="e.g. CPT approved, waiting for OPT, do I need ITIN?" maxlength="2000">
     </div>
     <button type="button" class="btn" id="ssb" data-action="ssn">Generate SSN Guide</button>
     <div class="output-wrap">
       <div id="sso" class="output">Results will appear here...</div>
-      <button type="button" class="copy-btn" data-copy-target="sso">Copy</button>
+      <button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="sso">Copy</button>
     </div>
   </div>
 </div>
 
-  <div id="bank" class="tab"><div class="card">
+  <div id="bank" class="tab" role="tabpanel" aria-labelledby="tab-btn-bank"><div class="card">
     <h2><i class="fas fa-university"></i> Open a Bank Account</h2>
     <div class="hint">💳 <strong>Tip:</strong> Chase/BofA open accounts with passport. Start credit score with a secured card.</div>
-    <div class="field"><label>Situation</label><select id="ba1"><option>Open bank account without SSN</option><option>Get a credit card</option><option>Build credit score from scratch</option><option>Best free bank?</option></select></div>
+    <div class="field"><label for="ba1">Situation</label><select id="ba1"><option>Open bank account without SSN</option><option>Get a credit card</option><option>Build credit score from scratch</option><option>Best free bank?</option></select></div>
     <button type="button" class="btn" id="bb" data-action="bank">Generate Guide</button>
-    <div class="output-wrap"><div id="bo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="bo">Copy</button></div>
+    <div class="output-wrap"><div id="bo" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="bo">Copy</button></div>
   </div></div>
 
-  <div id="phone" class="tab"><div class="card">
+  <div id="phone" class="tab" role="tabpanel" aria-labelledby="tab-btn-phone"><div class="card">
     <h2><i class="fas fa-phone"></i> US Phone Number</h2>
     <div class="hint">📱 <strong>Tip:</strong> Get a free US number without SSN using Google Voice.</div>
-    <div class="field"><label>Topic</label><select id="p1"><option>Free number (Google Voice)</option><option>Cheap plans (Mint, Visible, T-Mobile)</option><option>Contract plan without SSN</option><option>Cheap international calls</option></select></div>
+    <div class="field"><label for="p1">Topic</label><select id="p1"><option>Free number (Google Voice)</option><option>Cheap plans (Mint, Visible, T-Mobile)</option><option>Contract plan without SSN</option><option>Cheap international calls</option></select></div>
     <button type="button" class="btn" id="pb" data-action="phone">Generate Guide</button>
-    <div class="output-wrap"><div id="po" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="po">Copy</button></div>
+    <div class="output-wrap"><div id="po" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="po">Copy</button></div>
   </div></div>
 
-  <div id="car" class="tab"><div class="card">
+  <div id="car" class="tab" role="tabpanel" aria-labelledby="tab-btn-car"><div class="card">
     <h2><i class="fas fa-car-side"></i> Car Rental / Purchase</h2>
     <div class="hint">🚗 <strong>Tip:</strong> You can buy a car without SSN. Start with CarMax/Carvana.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="ar1" placeholder="New Jersey" maxlength="2000"></div>
-      <div class="field"><label>Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
+      <div class="field"><label for="ar1">State</label><input id="ar1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="ar2">Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="arb" data-action="car">Generate Guide</button>
-    <div class="output-wrap"><div id="aro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="aro">Copy</button></div>
+    <div class="output-wrap"><div id="aro" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="aro">Copy</button></div>
   </div></div>
 
-  <div id="transfer" class="tab"><div class="card">
+  <div id="transfer" class="tab" role="tabpanel" aria-labelledby="tab-btn-transfer"><div class="card">
     <h2><i class="fas fa-exchange-alt"></i> Money Transfer (Wise / Zelle)</h2>
     <div class="hint">💸 <strong>Tip:</strong> Send money internationally with the lowest fees using Wise.</div>
-    <div class="field"><label>Topic</label><select id="w1"><option>Send money abroad with Wise</option><option>Wise limits and fees</option><option>How to use Zelle?</option><option>Venmo / CashApp guide</option></select></div>
+    <div class="field"><label for="w1">Topic</label><select id="w1"><option>Send money abroad with Wise</option><option>Wise limits and fees</option><option>How to use Zelle?</option><option>Venmo / CashApp guide</option></select></div>
     <button type="button" class="btn" id="wb" data-action="transfer">Generate Guide</button>
-    <div class="output-wrap"><div id="wo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="wo">Copy</button></div>
+    <div class="output-wrap"><div id="wo" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="wo">Copy</button></div>
   </div></div>
 
-  <div id="flights" class="tab"><div class="card">
+  <div id="flights" class="tab" role="tabpanel" aria-labelledby="tab-btn-flights"><div class="card">
     <h2><i class="fas fa-plane"></i> Flights & Baggage</h2>
     <div class="hint">✈️ <strong>Tip:</strong> International flights from NJ $400-700. Pay excess baggage 24 hours before for cheaper rates.</div>
     <div class="form-row">
-      <div class="field"><label>Airline</label><select id="u1"><option>Turkish Airlines</option><option>American Airlines</option><option>United</option><option>Delta</option></select></div>
-      <div class="field"><label>Topic</label><select id="u2"><option>Baggage fees and rules</option><option>How to find cheapest tickets?</option><option>Check-in guide</option><option>Refund / cancellation policy</option></select></div>
+      <div class="field"><label for="u1">Airline</label><select id="u1"><option>Turkish Airlines</option><option>American Airlines</option><option>United</option><option>Delta</option></select></div>
+      <div class="field"><label for="u2">Topic</label><select id="u2"><option>Baggage fees and rules</option><option>How to find cheapest tickets?</option><option>Check-in guide</option><option>Refund / cancellation policy</option></select></div>
     </div>
     <button type="button" class="btn" id="ub" data-action="flights">Generate Guide</button>
-    <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="uo">Copy</button></div>
+    <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="uo">Copy</button></div>
   </div></div>
 
-  <div id="ask" class="tab" role="tabpanel"><div class="card">
+  <div id="ask" class="tab" role="tabpanel" aria-labelledby="tab-btn-ask"><div class="card">
     <h2><i class="fas fa-question-circle"></i> Ask Any Question</h2>
     <div class="hint">🤖 Ask anything about life in the USA. You'll get a detailed answer.</div>
     <div class="field"><label for="q1">What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?" maxlength="2000"></textarea><div class="char-count" id="q1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
     <button type="button" class="btn" id="qb" data-action="ask">Answer</button>
-    <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button type="button" class="copy-btn" data-copy-target="qo">Copy</button></div>
+    <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button type="button" class="copy-btn" aria-label="Copy result to clipboard" data-copy-target="qo">Copy</button></div>
   </div></div>
 
-  <div id="feedback" class="tab" role="tabpanel"><div class="card">
+  <div id="feedback" class="tab" role="tabpanel" aria-labelledby="tab-btn-feedback"><div class="card">
     <h2><i class="fas fa-comment-dots"></i> Site Feedback</h2>
     <div class="hint">💬 Share your experience: what worked, what's missing, what should we improve?</div>
     <div class="field"><label for="fb1">Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..." maxlength="2000"></textarea><div class="char-count" id="fb1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
-    <div class="field"><label>Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
+    <div class="field"><label for="fb2">Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
     <button type="button" class="btn" id="fbb" data-action="feedback">Submit Feedback</button>
     <div class="output-wrap"><div id="fbo" class="output">Feedback status message will appear here...</div></div>
   </div></div>
@@ -770,28 +777,25 @@ textarea{resize:vertical;min-height:90px}
 </div>
 <script>
 function g(id){return document.getElementById(id).value;}
+function activateTab(tabId){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b=>{b.classList.remove('active');b.setAttribute('aria-selected','false');});
+  const target=document.getElementById(tabId);
+  if(!target) return;
+  target.classList.add('active');
+  const btn=[...document.querySelectorAll('.tabs button')].find(b=>b.dataset.tab===tabId);
+  if(btn){btn.classList.add('active');btn.setAttribute('aria-selected','true');}
+}
 function quickStart(tab){
+  activateTab(tab);
   const target=document.getElementById(tab);
   if(!target) return;
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
-  target.classList.add('active');
-  const match=[...document.querySelectorAll('.tabs button')].find(b=>b.dataset.tab===tab);
-  if(match) match.classList.add('active');
   const firstInput=target.querySelector('input,select,textarea');
   if(firstInput) firstInput.focus({preventScroll:true});
   target.scrollIntoView({behavior:'smooth',block:'start'});
 }
-function show(tab,btn){
-  const target=document.getElementById(tab);
-  if(!target) return;
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tabs button').forEach(b=>{b.classList.remove('active');b.setAttribute('aria-selected','false');});
-  target.classList.add('active');
-  if(btn){btn.classList.add('active');btn.setAttribute('aria-selected','true');}
-}
 function cp(id){
-  navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{
+  navigator.clipboard.writeText(document.getElementById(id).textContent).then(()=>{
     const btn=document.querySelector('#'+id).parentNode.querySelector('.copy-btn');
     btn.textContent='Copied!';
     setTimeout(()=>btn.textContent='Copy',2000);
@@ -801,24 +805,28 @@ async function call(endpoint,data,outId,btnId,label){
   const out=document.getElementById(outId);
   const btn=document.getElementById(btnId);
   btn.disabled=true;
-  btn.innerHTML='<span class="spinner"></span>Step 1/3: Preparing info';
+  btn.innerHTML='<span class="spinner"></span> Generating\u2026';
   out.classList.remove('error');
   out.classList.add('loading');
-  out.textContent='Step 2/3: Generating your guide...';
+  out.textContent='Generating your guide\u2026';
   try{
     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const j=await r.json().catch(()=>({}));
     out.classList.remove('loading');
     if(!r.ok){
       out.classList.add('error');
-      out.textContent='⚠️ Error: '+(j.error || 'Request could not be processed.');
+      if(r.status===429){
+        out.textContent='\u23F3 Too many requests. Please wait a moment and try again.';
+        return;
+      }
+      out.textContent='\u26A0\uFE0F Error: '+(j.error || 'Request could not be processed.');
       return;
     }
-    out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
+    out.textContent=(j.result || 'Could not generate result.');
   }catch(e){
     out.classList.remove('loading');
     out.classList.add('error');
-    out.textContent='⚠️ Connection error: '+e.message;
+    out.textContent='\u26A0\uFE0F Connection error: '+e.message;
   }finally{
     btn.disabled=false;
     btn.textContent=label;
@@ -839,6 +847,7 @@ async function sendFeedback(){
     out.textContent='Connection error: '+e.message;
   }finally{
     btn.disabled=false;
+    btn.textContent='Submit Feedback';
   }
 }
 
@@ -861,7 +870,7 @@ const ACTIONS = {
 
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('[data-tab]').forEach(btn => {
-    btn.addEventListener('click', () => show(btn.dataset.tab, btn));
+    btn.addEventListener('click', () => activateTab(btn.dataset.tab));
   });
   document.querySelectorAll('[data-quickstart]').forEach(el => {
     el.addEventListener('click', () => quickStart(el.dataset.quickstart));
@@ -1002,7 +1011,7 @@ def do_flights():
 
 @app.route('/ask', methods=['POST'])
 def do_ask():
-    d = require_json()
+    d = require_json(['question'])
     return llm_json(
         "You are a practical guide expert for people living in the USA. Give clear, step-by-step, safe answers in English.",
         d.get('question', '')
