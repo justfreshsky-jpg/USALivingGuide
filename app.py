@@ -111,9 +111,9 @@ def add_security_headers(response):
     return response
 
 def get_access_token():
-    now = time.time()
     metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token'
     with _token_lock:
+        now = time.time()
         if _token_cache['value'] and _token_cache['expires_at'] > now:
             return _token_cache['value']
 
@@ -123,21 +123,20 @@ def get_access_token():
             _token_cache['expires_at'] = now + 3300
             return env_token
 
-    try:
-        r = requests.get(metadata_url, headers={'Metadata-Flavor': 'Google'}, timeout=(1.5, 2.0))
-        if not r.ok:
-            logger.warning("Metadata server returned status %s", r.status_code)
-            return ''
-        data = r.json()
-        token = data.get('access_token', '')
-        expires_in = max(30, int(data.get('expires_in', 300)) - 30)
-        with _token_lock:
+        try:
+            r = requests.get(metadata_url, headers={'Metadata-Flavor': 'Google'}, timeout=(1.5, 2.0))
+            if not r.ok:
+                logger.warning("Metadata server returned status %s", r.status_code)
+                return ''
+            data = r.json()
+            token = data.get('access_token', '')
+            expires_in = max(30, int(data.get('expires_in', 300)) - 30)
             _token_cache['value'] = token
             _token_cache['expires_at'] = now + expires_in
-        return token
-    except Exception:
-        logger.warning("Failed to fetch access token from metadata server", exc_info=True)
-        return ''
+            return token
+        except Exception:
+            logger.warning("Failed to fetch access token from metadata server", exc_info=True)
+            return ''
 
 def call_vertex(system_prompt, user_prompt):
     if not GOOGLE_CLOUD_PROJECT:
