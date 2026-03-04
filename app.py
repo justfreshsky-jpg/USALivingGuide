@@ -27,11 +27,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-GOOGLE_CLOUD_PROJECT = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
-VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
-GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
-_token_cache = {'value': '', 'expires_at': 0}
-_token_lock = threading.Lock()
 
 # ─── RESPONSE CACHE ──────────────────────────────────────
 _RESPONSE_CACHE_TTL = 3600       # 1 hour
@@ -78,6 +73,9 @@ def _is_rate_limited(ip: str) -> bool:
         # Drop timestamps outside the window
         while q and q[0] < cutoff:
             q.popleft()
+        # Clean up empty deques for inactive IPs
+        if len(q) == 0:
+            del _rate_limit_store[ip]
         if len(q) >= _RATE_LIMIT_MAX:
             return True
         q.append(now)
@@ -109,88 +107,202 @@ def add_security_headers(response):
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     return response
 
-def get_access_token():
-    now = time.time()
-    with _token_lock:
-        if _token_cache['value'] and _token_cache['expires_at'] > now:
-            return _token_cache['value']
+# ─── LLM PROVIDERS ───────────────────────────────────────
 
-        env_token = os.environ.get('GOOGLE_OAUTH_ACCESS_TOKEN')
-        if env_token:
-            _token_cache['value'] = env_token
-            _token_cache['expires_at'] = now + 3300
-            return env_token
-
-    metadata_url = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token'
-    try:
-        r = requests.get(metadata_url, headers={'Metadata-Flavor': 'Google'}, timeout=(1.5, 2.0))
-        if not r.ok:
-            logger.warning("Metadata server returned status %s", r.status_code)
-            return ''
-        data = r.json()
-        token = data.get('access_token', '')
-        expires_in = max(30, int(data.get('expires_in', 300)) - 30)
-        with _token_lock:
-            _token_cache['value'] = token
-            _token_cache['expires_at'] = now + expires_in
-        return token
-    except Exception:
-        logger.warning("Failed to fetch access token from metadata server", exc_info=True)
+def _llm_via_groq(system: str, user: str) -> str:
+    key = os.environ.get('GROQ_KEY', '')
+    if not key:
         return ''
-
-def call_vertex(system_prompt, user_prompt):
-    if not GOOGLE_CLOUD_PROJECT:
-        return ''
-
-    token = get_access_token()
-    if not token:
-        return ''
-
-    endpoint = (
-        f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/"
-        f"projects/{GOOGLE_CLOUD_PROJECT}/locations/{VERTEX_LOCATION}/"
-        f"publishers/google/models/{GEMINI_MODEL}:generateContent"
-    )
     payload = {
-        'systemInstruction': {'parts': [{'text': system_prompt}]},
-        'contents': [{'role': 'user', 'parts': [{'text': user_prompt}]}],
-        'generationConfig': {'maxOutputTokens': 2000, 'temperature': 0.6}
+        'model': 'llama3-8b-8192',
+        'messages': [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': user},
+        ],
+        'max_tokens': 2000,
+        'temperature': 0.6,
     }
-    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
-
+    headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
     try:
-        r = requests.post(endpoint, headers=headers, json=payload, timeout=(3, 30))
+        r = requests.post('https://api.groq.com/openai/v1/chat/completions',
+                          headers=headers, json=payload, timeout=(5, 30))
+        if not r.ok:
+            logger.warning("Groq returned status %s", r.status_code)
+            return ''
+        return r.json()['choices'][0]['message']['content']
     except Exception:
-        logger.warning("POST request to Vertex AI failed", exc_info=True)
+        logger.warning("Groq call failed", exc_info=True)
         return ''
 
-    if not r.ok:
-        logger.warning("Vertex AI returned status %s: %s", r.status_code, r.text[:200])
-        return ''
 
+def _llm_via_cerebras(system: str, user: str) -> str:
+    key = os.environ.get('CEREBRAS_KEY', '')
+    if not key:
+        return ''
+    payload = {
+        'model': 'llama3.1-8b',
+        'messages': [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': user},
+        ],
+        'max_tokens': 2000,
+        'temperature': 0.6,
+    }
+    headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
     try:
+        r = requests.post('https://api.cerebras.ai/v1/chat/completions',
+                          headers=headers, json=payload, timeout=(5, 30))
+        if not r.ok:
+            logger.warning("Cerebras returned status %s", r.status_code)
+            return ''
+        return r.json()['choices'][0]['message']['content']
+    except Exception:
+        logger.warning("Cerebras call failed", exc_info=True)
+        return ''
+
+
+def _llm_via_gemini(system: str, user: str) -> str:
+    key = os.environ.get('GEMINI_KEY', '')
+    if not key:
+        return ''
+    payload = {
+        'systemInstruction': {'parts': [{'text': system}]},
+        'contents': [{'role': 'user', 'parts': [{'text': user}]}],
+        'generationConfig': {'maxOutputTokens': 2000, 'temperature': 0.6},
+    }
+    url = (
+        'https://generativelanguage.googleapis.com/v1beta/models/'
+        f'gemini-1.5-flash:generateContent?key={key}'
+    )
+    try:
+        r = requests.post(url, json=payload, timeout=(5, 30))
+        if not r.ok:
+            logger.warning("Gemini returned status %s", r.status_code)
+            return ''
         data = r.json()
-        candidates = data.get('candidates', [])
-        if not candidates:
-            logger.warning("Vertex AI returned no candidates (possibly safety-filtered): %s", data)
-            return ''
-        candidate = candidates[0]
-        if 'content' not in candidate:
-            finish_reason = candidate.get('finishReason', 'unknown')
-            logger.warning("Vertex AI candidate missing 'content' key (finishReason=%s)", finish_reason)
-            return ''
-        parts = candidate['content'].get('parts', [])
-        if not parts:
-            logger.warning("Vertex AI candidate content has no parts")
-            return ''
-        return parts[0].get('text', '')
+        return data['candidates'][0]['content']['parts'][0]['text']
     except Exception:
-        logger.warning("Failed to parse Vertex AI response JSON", exc_info=True)
+        logger.warning("Gemini call failed", exc_info=True)
         return ''
+
+
+def _llm_via_cohere(system: str, user: str) -> str:
+    key = os.environ.get('COHERE_KEY', '')
+    if not key:
+        return ''
+    payload = {
+        'model': 'command-r-plus',
+        'preamble': system,
+        'message': user,
+        'max_tokens': 2000,
+        'temperature': 0.6,
+    }
+    headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
+    try:
+        r = requests.post('https://api.cohere.ai/v1/chat',
+                          headers=headers, json=payload, timeout=(5, 30))
+        if not r.ok:
+            logger.warning("Cohere returned status %s", r.status_code)
+            return ''
+        return r.json()['text']
+    except Exception:
+        logger.warning("Cohere call failed", exc_info=True)
+        return ''
+
+
+def _llm_via_mistral(system: str, user: str) -> str:
+    key = os.environ.get('MISTRAL_KEY', '')
+    if not key:
+        return ''
+    payload = {
+        'model': 'mistral-small-latest',
+        'messages': [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': user},
+        ],
+        'max_tokens': 2000,
+        'temperature': 0.6,
+    }
+    headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
+    try:
+        r = requests.post('https://api.mistral.ai/v1/chat/completions',
+                          headers=headers, json=payload, timeout=(5, 30))
+        if not r.ok:
+            logger.warning("Mistral returned status %s", r.status_code)
+            return ''
+        return r.json()['choices'][0]['message']['content']
+    except Exception:
+        logger.warning("Mistral call failed", exc_info=True)
+        return ''
+
+
+def _llm_via_openrouter(system: str, user: str) -> str:
+    key = os.environ.get('OPENROUTER_KEY', '')
+    if not key:
+        return ''
+    payload = {
+        'model': 'mistralai/mistral-7b-instruct',
+        'messages': [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': user},
+        ],
+        'max_tokens': 2000,
+        'temperature': 0.6,
+    }
+    headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
+    try:
+        r = requests.post('https://openrouter.ai/api/v1/chat/completions',
+                          headers=headers, json=payload, timeout=(5, 30))
+        if not r.ok:
+            logger.warning("OpenRouter returned status %s", r.status_code)
+            return ''
+        return r.json()['choices'][0]['message']['content']
+    except Exception:
+        logger.warning("OpenRouter call failed", exc_info=True)
+        return ''
+
+
+def _llm_via_huggingface(system: str, user: str) -> str:
+    key = os.environ.get('HF_KEY', '')
+    if not key:
+        return ''
+    prompt = f"[INST] <<SYS>>\n{system}\n<</SYS>>\n\n{user} [/INST]"
+    payload = {
+        'inputs': prompt,
+        'parameters': {'max_new_tokens': 2000, 'temperature': 0.6, 'return_full_text': False},
+    }
+    headers = {'Authorization': f'Bearer {key}'}
+    try:
+        r = requests.post(
+            'https://api-inference.huggingface.co/models/meta-llama/Llama-2-7b-chat-hf',
+            headers=headers, json=payload, timeout=(5, 30),
+        )
+        if not r.ok:
+            logger.warning("HuggingFace returned status %s", r.status_code)
+            return ''
+        data = r.json()
+        if isinstance(data, list) and data:
+            return data[0].get('generated_text', '')
+        return ''
+    except Exception:
+        logger.warning("HuggingFace call failed", exc_info=True)
+        return ''
+
+
+_PROVIDERS = [
+    _llm_via_groq,
+    _llm_via_cerebras,
+    _llm_via_gemini,
+    _llm_via_cohere,
+    _llm_via_mistral,
+    _llm_via_openrouter,
+    _llm_via_huggingface,
+]
 
 
 # ─── BACKGROUND BLOG CONTENT ─────────────────────────────
 _blog_cache = {"content": "", "last": 0}
+_blog_cache_lock = threading.Lock()
 _refresh_thread_started = False
 _refresh_thread_lock = threading.Lock()
 
@@ -236,14 +348,17 @@ def _fetch_blog():
                 if len(text) > 100:
                     combined += text[:800] + "\n---\n"
         if combined:
-            _blog_cache["content"] = combined[:6000]
-            _blog_cache["last"] = time.time()
+            with _blog_cache_lock:
+                _blog_cache["content"] = combined[:6000]
+                _blog_cache["last"] = time.time()
     except requests.RequestException as exc:
         logger.warning("Blog fetch failed (%s); using fallback content", exc.__class__.__name__)
-        _blog_cache["content"] = FALLBACK
+        with _blog_cache_lock:
+            _blog_cache["content"] = FALLBACK
     except Exception:
         logger.exception("Blog fetch failed unexpectedly; using fallback content")
-        _blog_cache["content"] = FALLBACK
+        with _blog_cache_lock:
+            _blog_cache["content"] = FALLBACK
 
 def _bg_refresh():
     while True:
@@ -264,9 +379,9 @@ def ensure_bg_refresh_started():
         _refresh_thread_started = True
 
 def get_context():
-    if not _blog_cache["content"]:
-        return FALLBACK
-    return _blog_cache["content"]
+    with _blog_cache_lock:
+        content = _blog_cache["content"]
+    return content if content else FALLBACK
 
 # ─── TOPIC GUIDE DATA ─────────────────────────────────────
 TOPIC_GUIDES = [
@@ -325,79 +440,17 @@ TOPIC_GUIDES = [
 ]
 
 # ─── AI ─────────────────────────────────────────────
-def local_fallback_reply(user):
-    raw_question = (user or 'General question').strip()
-
-    question = raw_question
-    cleanup_patterns = [
-        r"Income:\s*\$\s*(?:\.|$)",
-        r"State:\s*(?:\.|$)",
-        r"Visa:\s*(?:\.|$)",
-    ]
-    for pattern in cleanup_patterns:
-        question = re.sub(pattern, '', question, flags=re.IGNORECASE)
-    question = re.sub(r'\s+', ' ', question).strip(' .') or 'General question'
-    q = question.lower()
-
-    form_match = re.search(r"Form:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
-    visa_match = re.search(r"Visa:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
-    state_match = re.search(r"State:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
-    income_match = re.search(r"Income:\s*\$?\s*([0-9][0-9,]*)", raw_question, flags=re.IGNORECASE)
-
-    topic_guides = TOPIC_GUIDES
-
-    summary = [
-        'Use official government or provider websites for final verification.',
-        'Prepare your IDs/documents before starting applications.',
-        'Keep copies of every submission, receipt, and confirmation number.'
-    ]
-    checklist = [
-        'Define your exact goal + state (NJ/NY/etc.).',
-        'Gather required IDs and proofs first.',
-        'Complete the application and save confirmation records.',
-    ]
-
-    for keys, s_items, c_items in topic_guides:
-        if any(k in q for k in keys):
-            summary = s_items
-            checklist = c_items
-            break
-
-    if any(k in q for k in ['tax', 'w-4', 'w-2', '1099', 'refund', 'irs']):
-        form = form_match.group(1).strip() if form_match else 'tax filing'
-        visa = visa_match.group(1).strip() if visa_match else 'your visa category'
-        state = state_match.group(1).strip() if state_match else 'your state'
-        income = income_match.group(1).strip() if income_match else 'your annual income'
-        if not state or state == '.':
-            state = 'your state'
-
-        summary = [
-            f'For {form}, first verify whether you need only federal filing or both federal + {state} filing.',
-            f'With {visa}, check treaty benefits and filing status before submitting returns.',
-            f'Estimate withholding/refund using {income} and keep payroll/tax documents together.'
-        ]
-        checklist = [
-            'Collect W-2/1099 statements, prior return (if any), and ID documents.',
-            'Prepare federal return first, then state return, and review numbers twice before filing.',
-            'Save PDF copies + confirmations and track refund status after submission.',
-        ]
-
-    summary_block = '\n'.join(f"- {item}" for item in summary)
-    checklist_block = '\n'.join(f"✅ {idx+1}. {item}" for idx, item in enumerate(checklist))
-
+def local_fallback_reply(user=None):
     return (
-        "✅ Quick USA Living Guide (Offline Mode)\n\n"
-        f"📌 Question: {question}\n\n"
-        "1) Quick Summary\n"
-        f"{summary_block}\n\n"
-        "2) Step-by-Step Checklist\n"
-        f"{checklist_block}\n\n"
-        "3) Common Mistakes / Risks\n"
-        "- Missing required IDs/documents before appointments\n"
-        "- Using unofficial sources instead of government/provider websites\n"
-        "- Waiting until deadlines for tax/visa/license actions\n\n"
-        "4) Next Step\n"
-        "- Share your STATE + timeline and I will generate a tighter checklist."
+        "✅ USA Living Guide\n\n"
+        "Our AI assistant is temporarily unavailable. Please try again in a few moments.\n\n"
+        "In the meantime, visit these official resources:\n"
+        "- uscis.gov — Immigration and visa information\n"
+        "- irs.gov — Tax filing and forms\n"
+        "- ssa.gov — Social Security Administration\n"
+        "- healthcare.gov — Health insurance marketplace\n"
+        "- dmv.org — Driver's license and DMV info\n\n"
+        "If the issue persists, please use the Feedback tab to let us know."
     )
 
 def _clean_ai_text(text):
@@ -414,9 +467,6 @@ def _clean_ai_text(text):
     return ''.join(cleaned).strip()
 
 def llm(system, user):
-    if not GOOGLE_CLOUD_PROJECT:
-        return local_fallback_reply(user)
-
     usa_prompt = """
     🇺🇸 ONLY ANSWER ABOUT USA-RELATED TOPICS
     ✅ USA VISA / SSN / BANK / HOUSING / UBER / TAX / HEALTH
@@ -434,12 +484,17 @@ def llm(system, user):
 
     full_system = system + "\n\n" + usa_prompt + "\n\nReference data:\n" + get_context()
 
-    key = _cache_key(full_system, user)
+    key = _cache_key(system, user)
     cached = _response_cache_get(key)
     if cached is not None:
         return cached
 
-    text = call_vertex(system_prompt=full_system, user_prompt=user)
+    text = ''
+    for provider in _PROVIDERS:
+        text = provider(full_system, user)
+        if text:
+            break
+
     if not text:
         return local_fallback_reply(user)
 
@@ -507,9 +562,8 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#f0f4ff;color:#1e293b}
 .feat h3{font-size:1em;margin-bottom:4px}
 .feat p{font-size:.82em;color:#64748b}
 .container{max-width:900px;margin:0 auto;padding:20px}
-.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:24px 0}
-@media(max-width:600px){.tabs{grid-template-columns:repeat(2,1fr)}}
-.tabs button{background:#fff;border:2px solid #e2e8f0;padding:12px 8px;border-radius:12px;cursor:pointer;font-size:12px;font-weight:600;color:#1e293b;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:4px}
+.tabs{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px;margin:24px 0}
+.tabs button{background:#fff;border:2px solid #e2e8f0;padding:12px 8px;border-radius:12px;cursor:pointer;font-size:11px;font-weight:600;color:#1e293b;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:4px}
 .tabs button i{font-size:1.4em;color:#3b82f6}
 .tabs button.active{background:#1e3a8a;color:#fff;border-color:#3b82f6}
 .tabs button.active i{color:#fff}
@@ -519,7 +573,7 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#f0f4ff;color:#1e293b}
 @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 .card{background:#fff;border-radius:16px;padding:28px;box-shadow:0 4px 20px rgba(0,0,0,.08)}
 .card h2{color:#1e3a8a;font-size:1.5em;margin-bottom:12px;display:flex;align-items:center;gap:10px}
-.hint{background:#f0f9ff;border-left:4px solid #10b981;padding:14px 16px;border-radius:0 10px 10px 0;margin-bottom:20px;font-size:.9em;color:#0f4c75}
+.hint{background:#f0f9ff;border-left:4px solid #3b82f6;padding:14px 16px;border-radius:0 10px 10px 0;margin-bottom:20px;font-size:.9em;color:#0f4c75}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 @media(max-width:500px){.form-row{grid-template-columns:1fr}}
 .field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
@@ -545,7 +599,7 @@ textarea{resize:vertical;min-height:90px}
 </head>
 <body>
 <div class="hero">
-  <h1>🇺🇸 USA Living Guide</h1>
+  <h1 style="cursor:pointer" title="Click to reload">🇺🇸 USA Living Guide</h1>
   <p>Create your personal roadmap for your first 30 days in the USA in 2-3 minutes.</p>
   <div class="steps">
     <span class="step">1️⃣ Pick a Topic</span>
@@ -594,10 +648,10 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-passport"></i> Visa & Green Card</h2>
     <div class="hint">🎯 <strong>For newcomers:</strong> Start with J-1, switch to H-1B once you find a job.</div>
     <div class="form-row">
-      <div class="field"><label>Visa Type</label><select id="v1"><option>J-1 Student</option><option>H-1B Work</option><option>E-2 Investor</option><option>Green Card (EB)</option><option>F-1 Student</option><option>Visitor B-2</option></select></div>
-      <div class="field"><label>State</label><input id="v2" placeholder="e.g. New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="v1">Visa Type</label><select id="v1"><option>J-1 Student</option><option>H-1B Work</option><option>E-2 Investor</option><option>Green Card (EB)</option><option>F-1 Student</option><option>Visitor B-2</option></select></div>
+      <div class="field"><label for="v2">State</label><input id="v2" placeholder="e.g. New Jersey" maxlength="2000"></div>
     </div>
-    <div class="field"><label>Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
+    <div class="field"><label for="v3">Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
     <button type="button" class="btn" id="vb" data-action="visa">Generate Visa Plan</button>
     <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="vo">Copy</button></div>
   </div></div>
@@ -606,12 +660,12 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-calculator"></i> Tax Refund & Forms</h2>
     <div class="hint">💰 <strong>Tip:</strong> File 1040NR in your first year. Add 1099 if you do rideshare.</div>
     <div class="form-row">
-      <div class="field"><label>Form Type</label><select id="t1"><option>W-4 (Payroll)</option><option>1040NR (International)</option><option>1099-K (Rideshare)</option><option>W-2 (Employee)</option></select></div>
-      <div class="field"><label>Annual Income ($)</label><input id="t2" type="number" placeholder="e.g. 35000"></div>
+      <div class="field"><label for="t1">Form Type</label><select id="t1"><option>W-4 (Payroll)</option><option>1040NR (International)</option><option>1099-K (Rideshare)</option><option>W-2 (Employee)</option></select></div>
+      <div class="field"><label for="t2">Annual Income ($)</label><input id="t2" type="number" min="0" placeholder="e.g. 35000"></div>
     </div>
     <div class="form-row">
-      <div class="field"><label>Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
-      <div class="field"><label>State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="t3">Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
+      <div class="field"><label for="t4">State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
     </div>
     <button type="button" class="btn" id="tb" data-action="tax">Generate Tax Checklist</button>
     <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
@@ -621,10 +675,10 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-car"></i> Earn with Uber / Lyft</h2>
     <div class="hint">🚗 <strong>For newcomers:</strong> License + car + SSN is enough. $800-1500/week.</div>
     <div class="form-row">
-      <div class="field"><label>App</label><select id="r1"><option>Uber</option><option>Lyft</option><option>Both</option></select></div>
-      <div class="field"><label>State</label><input id="r2" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="r1">App</label><select id="r1"><option>Uber</option><option>Lyft</option><option>Both</option></select></div>
+      <div class="field"><label for="r2">State</label><input id="r2" placeholder="New Jersey" maxlength="2000"></div>
     </div>
-    <div class="field"><label>Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
+    <div class="field"><label for="r3">Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
     <button type="button" class="btn" id="rb" data-action="rideshare">Generate Plan</button>
     <div class="output-wrap"><div id="ro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ro">Copy</button></div>
   </div></div>
@@ -633,10 +687,10 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-home"></i> Apartment Rental</h2>
     <div class="hint">🏠 <strong>Tip:</strong> NJ Newark/Paterson 1BR $900-1200. Try Craigslist and Zillow.</div>
     <div class="form-row">
-      <div class="field"><label>City / Area</label><input id="e1" placeholder="e.g. Newark NJ, Jersey City" maxlength="2000"></div>
-      <div class="field"><label>Budget ($/month)</label><input id="e2" type="number" placeholder="1200"></div>
+      <div class="field"><label for="e1">City / Area</label><input id="e1" placeholder="e.g. Newark NJ, Jersey City" maxlength="2000"></div>
+      <div class="field"><label for="e2">Budget ($/month)</label><input id="e2" type="number" min="0" placeholder="1200"></div>
     </div>
-    <div class="field"><label>Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets" maxlength="2000"></div>
+    <div class="field"><label for="e3">Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets" maxlength="2000"></div>
     <button type="button" class="btn" id="eb" data-action="housing">Generate Plan</button>
     <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="eo">Copy</button></div>
   </div></div>
@@ -645,8 +699,8 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-heartbeat"></i> Free Health Insurance</h2>
     <div class="hint">🏥 <strong>Tip:</strong> Medicaid is free in NJ for low income. Some clinics don't require documents.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="h1" placeholder="New Jersey" maxlength="2000"></div>
-      <div class="field"><label>Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
+      <div class="field"><label for="h1">State</label><input id="h1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="h2">Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="hb" data-action="health">Generate Guide</button>
     <div class="output-wrap"><div id="ho" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ho">Copy</button></div>
@@ -656,8 +710,8 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-id-card"></i> Driver's License (DMV)</h2>
     <div class="hint">🪪 <strong>Tip:</strong> NJ has the 6 Points of ID system. Even undocumented can get a license.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="l1" placeholder="New Jersey" maxlength="2000"></div>
-      <div class="field"><label>Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
+      <div class="field"><label for="l1">State</label><input id="l1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="l2">Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
     </div>
     <button type="button" class="btn" id="lb" data-action="license">Generate Guide</button>
     <div class="output-wrap"><div id="lo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="lo">Copy</button></div>
@@ -669,7 +723,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">🆔 <strong>For newcomers:</strong> F-1/J-1 students can get it with CPT/OPT. SSN is required for on-campus jobs.</div>
     <div class="form-row">
       <div class="field">
-        <label>Visa Type</label>
+        <label for="ss1">Visa Type</label>
         <select id="ss1">
           <option>F-1 Student (CPT/OPT)</option>
           <option>J-1 Student</option>
@@ -680,12 +734,12 @@ textarea{resize:vertical;min-height:90px}
         </select>
       </div>
       <div class="field">
-        <label>State</label>
+        <label for="ss2">State</label>
         <input id="ss2" placeholder="New Jersey" maxlength="2000">
       </div>
     </div>
     <div class="field">
-      <label>Situation</label>
+      <label for="ss3">Situation</label>
       <input id="ss3" placeholder="e.g. CPT approved, waiting for OPT, do I need ITIN?" maxlength="2000">
     </div>
     <button type="button" class="btn" id="ssb" data-action="ssn">Generate SSN Guide</button>
@@ -699,7 +753,7 @@ textarea{resize:vertical;min-height:90px}
   <div id="bank" class="tab"><div class="card">
     <h2><i class="fas fa-university"></i> Open a Bank Account</h2>
     <div class="hint">💳 <strong>Tip:</strong> Chase/BofA open accounts with passport. Start credit score with a secured card.</div>
-    <div class="field"><label>Situation</label><select id="ba1"><option>Open bank account without SSN</option><option>Get a credit card</option><option>Build credit score from scratch</option><option>Best free bank?</option></select></div>
+    <div class="field"><label for="ba1">Situation</label><select id="ba1"><option>Open bank account without SSN</option><option>Get a credit card</option><option>Build credit score from scratch</option><option>Best free bank?</option></select></div>
     <button type="button" class="btn" id="bb" data-action="bank">Generate Guide</button>
     <div class="output-wrap"><div id="bo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="bo">Copy</button></div>
   </div></div>
@@ -707,7 +761,7 @@ textarea{resize:vertical;min-height:90px}
   <div id="phone" class="tab"><div class="card">
     <h2><i class="fas fa-phone"></i> US Phone Number</h2>
     <div class="hint">📱 <strong>Tip:</strong> Get a free US number without SSN using Google Voice.</div>
-    <div class="field"><label>Topic</label><select id="p1"><option>Free number (Google Voice)</option><option>Cheap plans (Mint, Visible, T-Mobile)</option><option>Contract plan without SSN</option><option>Cheap international calls</option></select></div>
+    <div class="field"><label for="p1">Topic</label><select id="p1"><option>Free number (Google Voice)</option><option>Cheap plans (Mint, Visible, T-Mobile)</option><option>Contract plan without SSN</option><option>Cheap international calls</option></select></div>
     <button type="button" class="btn" id="pb" data-action="phone">Generate Guide</button>
     <div class="output-wrap"><div id="po" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="po">Copy</button></div>
   </div></div>
@@ -716,8 +770,8 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-car-side"></i> Car Rental / Purchase</h2>
     <div class="hint">🚗 <strong>Tip:</strong> You can buy a car without SSN. Start with CarMax/Carvana.</div>
     <div class="form-row">
-      <div class="field"><label>State</label><input id="ar1" placeholder="New Jersey" maxlength="2000"></div>
-      <div class="field"><label>Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
+      <div class="field"><label for="ar1">State</label><input id="ar1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="ar2">Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="arb" data-action="car">Generate Guide</button>
     <div class="output-wrap"><div id="aro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="aro">Copy</button></div>
@@ -726,7 +780,7 @@ textarea{resize:vertical;min-height:90px}
   <div id="transfer" class="tab"><div class="card">
     <h2><i class="fas fa-exchange-alt"></i> Money Transfer (Wise / Zelle)</h2>
     <div class="hint">💸 <strong>Tip:</strong> Send money internationally with the lowest fees using Wise.</div>
-    <div class="field"><label>Topic</label><select id="w1"><option>Send money abroad with Wise</option><option>Wise limits and fees</option><option>How to use Zelle?</option><option>Venmo / CashApp guide</option></select></div>
+    <div class="field"><label for="w1">Topic</label><select id="w1"><option>Send money abroad with Wise</option><option>Wise limits and fees</option><option>How to use Zelle?</option><option>Venmo / CashApp guide</option></select></div>
     <button type="button" class="btn" id="wb" data-action="transfer">Generate Guide</button>
     <div class="output-wrap"><div id="wo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="wo">Copy</button></div>
   </div></div>
@@ -735,8 +789,8 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-plane"></i> Flights & Baggage</h2>
     <div class="hint">✈️ <strong>Tip:</strong> International flights from NJ $400-700. Pay excess baggage 24 hours before for cheaper rates.</div>
     <div class="form-row">
-      <div class="field"><label>Airline</label><select id="u1"><option>Turkish Airlines</option><option>American Airlines</option><option>United</option><option>Delta</option></select></div>
-      <div class="field"><label>Topic</label><select id="u2"><option>Baggage fees and rules</option><option>How to find cheapest tickets?</option><option>Check-in guide</option><option>Refund / cancellation policy</option></select></div>
+      <div class="field"><label for="u1">Airline</label><select id="u1"><option>Turkish Airlines</option><option>American Airlines</option><option>United</option><option>Delta</option></select></div>
+      <div class="field"><label for="u2">Topic</label><select id="u2"><option>Baggage fees and rules</option><option>How to find cheapest tickets?</option><option>Check-in guide</option><option>Refund / cancellation policy</option></select></div>
     </div>
     <button type="button" class="btn" id="ub" data-action="flights">Generate Guide</button>
     <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="uo">Copy</button></div>
@@ -754,7 +808,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-comment-dots"></i> Site Feedback</h2>
     <div class="hint">💬 Share your experience: what worked, what's missing, what should we improve?</div>
     <div class="field"><label for="fb1">Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..." maxlength="2000"></textarea><div class="char-count" id="fb1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
-    <div class="field"><label>Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
+    <div class="field"><label for="fb2">Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
     <button type="button" class="btn" id="fbb" data-action="feedback">Submit Feedback</button>
     <div class="output-wrap"><div id="fbo" class="output">Feedback status message will appear here...</div></div>
   </div></div>
@@ -780,7 +834,8 @@ function quickStart(tab){
   if(match) match.classList.add('active');
   const firstInput=target.querySelector('input,select,textarea');
   if(firstInput) firstInput.focus({preventScroll:true});
-  target.scrollIntoView({behavior:'smooth',block:'start'});
+  // Delay scroll to allow tab content to render before scrolling into view
+  setTimeout(()=>target.scrollIntoView({behavior:'smooth',block:'start'}),50);
 }
 function show(tab,btn){
   const target=document.getElementById(tab);
@@ -860,6 +915,7 @@ const ACTIONS = {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+  document.querySelector('.hero h1').addEventListener('click', () => location.reload());
   document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.addEventListener('click', () => show(btn.dataset.tab, btn));
   });
@@ -897,10 +953,14 @@ def index():
 
 @app.route('/healthz')
 def healthz():
-    return jsonify(
-        status='ok',
-        vertex_configured=bool(GOOGLE_CLOUD_PROJECT and get_access_token())
-    )
+    active_providers = [
+        name for name, key_env in [
+            ('groq', 'GROQ_KEY'), ('cerebras', 'CEREBRAS_KEY'), ('gemini', 'GEMINI_KEY'),
+            ('cohere', 'COHERE_KEY'), ('mistral', 'MISTRAL_KEY'),
+            ('openrouter', 'OPENROUTER_KEY'), ('huggingface', 'HF_KEY'),
+        ] if os.environ.get(key_env)
+    ]
+    return jsonify(status='ok', providers_configured=active_providers)
 
 @app.route('/visa', methods=['POST'])
 def do_visa():
