@@ -1,9 +1,10 @@
+import hashlib
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 import re
 import unicodedata
-from collections import deque
+from collections import deque, OrderedDict
 import requests
 import threading
 import time
@@ -31,6 +32,82 @@ VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
 _token_cache = {'value': '', 'expires_at': 0}
 _token_lock = threading.Lock()
+
+# ─── RESPONSE CACHE ──────────────────────────────────────
+_RESPONSE_CACHE_TTL = 3600       # 1 hour
+_RESPONSE_CACHE_MAX = 500
+_response_cache: 'OrderedDict[str, tuple]' = OrderedDict()
+_response_cache_lock = threading.Lock()
+
+def _cache_key(system: str, user: str) -> str:
+    import json
+    return hashlib.sha256(json.dumps([system, user], ensure_ascii=False).encode()).hexdigest()
+
+def _response_cache_get(key: str):
+    with _response_cache_lock:
+        entry = _response_cache.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if time.time() > expires_at:
+            del _response_cache[key]
+            return None
+        # Move to end (LRU)
+        _response_cache.move_to_end(key)
+        return value
+
+def _response_cache_set(key: str, value: str):
+    with _response_cache_lock:
+        if key in _response_cache:
+            _response_cache.move_to_end(key)
+        _response_cache[key] = (value, time.time() + _RESPONSE_CACHE_TTL)
+        while len(_response_cache) > _RESPONSE_CACHE_MAX:
+            _response_cache.popitem(last=False)
+
+# ─── RATE LIMITING ────────────────────────────────────────
+_RATE_LIMIT_MAX = 20
+_RATE_LIMIT_WINDOW = 60          # seconds
+_rate_limit_store: 'dict[str, deque]' = {}
+_rate_limit_lock = threading.Lock()
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.time()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    with _rate_limit_lock:
+        q = _rate_limit_store.setdefault(ip, deque())
+        # Drop timestamps outside the window
+        while q and q[0] < cutoff:
+            q.popleft()
+        if len(q) >= _RATE_LIMIT_MAX:
+            return True
+        q.append(now)
+        return False
+
+@app.before_request
+def check_rate_limit():
+    if request.method == 'POST':
+        ip = request.remote_addr
+        if not ip:
+            return  # No IP available; skip rate limiting
+        if _is_rate_limited(ip):
+            return jsonify(error='Too many requests. Please wait before trying again.'), 429
+
+# ─── SECURITY HEADERS ─────────────────────────────────────
+@app.after_request
+def add_security_headers(response):
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "font-src 'self' https://cdnjs.cloudflare.com; "
+        "script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self';"
+    )
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    return response
 
 def get_access_token():
     now = time.time()
@@ -93,14 +170,27 @@ def call_vertex(system_prompt, user_prompt):
 
     try:
         data = r.json()
-        return data['candidates'][0]['content']['parts'][0]['text']
+        candidates = data.get('candidates', [])
+        if not candidates:
+            logger.warning("Vertex AI returned no candidates (possibly safety-filtered): %s", data)
+            return ''
+        candidate = candidates[0]
+        if 'content' not in candidate:
+            finish_reason = candidate.get('finishReason', 'unknown')
+            logger.warning("Vertex AI candidate missing 'content' key (finishReason=%s)", finish_reason)
+            return ''
+        parts = candidate['content'].get('parts', [])
+        if not parts:
+            logger.warning("Vertex AI candidate content has no parts")
+            return ''
+        return parts[0].get('text', '')
     except Exception:
         logger.warning("Failed to parse Vertex AI response JSON", exc_info=True)
         return ''
 
 
 # ─── BACKGROUND BLOG CONTENT ─────────────────────────────
-_cache = {"content": "", "last": 0}
+_blog_cache = {"content": "", "last": 0}
 _refresh_thread_started = False
 _refresh_thread_lock = threading.Lock()
 
@@ -146,14 +236,14 @@ def _fetch_blog():
                 if len(text) > 100:
                     combined += text[:800] + "\n---\n"
         if combined:
-            _cache["content"] = combined[:6000]
-            _cache["last"] = time.time()
+            _blog_cache["content"] = combined[:6000]
+            _blog_cache["last"] = time.time()
     except requests.RequestException as exc:
         logger.warning("Blog fetch failed (%s); using fallback content", exc.__class__.__name__)
-        _cache["content"] = FALLBACK
+        _blog_cache["content"] = FALLBACK
     except Exception:
         logger.exception("Blog fetch failed unexpectedly; using fallback content")
-        _cache["content"] = FALLBACK
+        _blog_cache["content"] = FALLBACK
 
 def _bg_refresh():
     while True:
@@ -174,9 +264,65 @@ def ensure_bg_refresh_started():
         _refresh_thread_started = True
 
 def get_context():
-    if not _cache["content"]:
+    if not _blog_cache["content"]:
         return FALLBACK
-    return _cache["content"]
+    return _blog_cache["content"]
+
+# ─── TOPIC GUIDE DATA ─────────────────────────────────────
+TOPIC_GUIDES = [
+    (
+        ['uber', 'lyft', 'rideshare', 'gig'],
+        [
+            'Start with driver signup: SSN, valid driver license, vehicle registration, and insurance.',
+            'Track every trip expense (gas, maintenance, phone, tolls) for tax deductions.',
+            'Expect year-end forms (1099-K/1099-NEC) and set aside tax money weekly.'
+        ],
+        [
+            'Create Uber/Lyft account and upload documents for approval.',
+            'Complete required background check and vehicle inspection.',
+            'Drive during peak hours and keep a weekly earnings + expense log.',
+        ],
+    ),
+    (
+        ['visa', 'f-1', 'j-1', 'h-1b', 'green card', 'opt', 'cpt'],
+        [
+            'Keep passport, I-94, and visa documents valid and stored in one folder.',
+            'Follow status-specific rules (F-1/J-1 work limits, H-1B employer restrictions).',
+            'Use official USCIS/State Department pages for forms and deadlines.'
+        ],
+        [
+            'Confirm your current status and expiration dates.',
+            'Prepare required forms and supporting documents before filing.',
+            'Book appointments early and keep receipt numbers for tracking.',
+        ],
+    ),
+    (
+        ['rent', 'housing', 'apartment', 'lease', 'landlord'],
+        [
+            'Search on trusted listing sites and compare commute + safety + total monthly cost.',
+            'Prepare ID, proof of income, and references before applying.',
+            'Read lease terms carefully (deposit, maintenance, renewal, penalties).'
+        ],
+        [
+            'Set your budget including utilities and internet.',
+            'Tour multiple units and document apartment condition before move-in.',
+            'Sign lease only after confirming all fees and move-out terms.',
+        ],
+    ),
+    (
+        ['tax', '1099', 'w-2', 'w-4', 'refund', 'irs'],
+        [
+            'Collect all forms first (W-2/1099/1098) before filing.',
+            'Use the correct filing status and include state return if required.',
+            'File before deadlines and keep PDF copies of all submissions.'
+        ],
+        [
+            'Create IRS account and gather identity/tax documents.',
+            'Prepare federal return, then state return, then submit.',
+            'Track refund status and respond quickly to IRS letters.',
+        ],
+    ),
+]
 
 # ─── AI ─────────────────────────────────────────────
 def local_fallback_reply(user):
@@ -198,60 +344,7 @@ def local_fallback_reply(user):
     state_match = re.search(r"State:\s*([^.,\n]+)", raw_question, flags=re.IGNORECASE)
     income_match = re.search(r"Income:\s*\$?\s*([0-9][0-9,]*)", raw_question, flags=re.IGNORECASE)
 
-    topic_guides = [
-        (
-            ['uber', 'lyft', 'rideshare', 'gig'],
-            [
-                'Start with driver signup: SSN, valid driver license, vehicle registration, and insurance.',
-                'Track every trip expense (gas, maintenance, phone, tolls) for tax deductions.',
-                'Expect year-end forms (1099-K/1099-NEC) and set aside tax money weekly.'
-            ],
-            [
-                'Create Uber/Lyft account and upload documents for approval.',
-                'Complete required background check and vehicle inspection.',
-                'Drive during peak hours and keep a weekly earnings + expense log.',
-            ],
-        ),
-        (
-            ['visa', 'f-1', 'j-1', 'h-1b', 'green card', 'opt', 'cpt'],
-            [
-                'Keep passport, I-94, and visa documents valid and stored in one folder.',
-                'Follow status-specific rules (F-1/J-1 work limits, H-1B employer restrictions).',
-                'Use official USCIS/State Department pages for forms and deadlines.'
-            ],
-            [
-                'Confirm your current status and expiration dates.',
-                'Prepare required forms and supporting documents before filing.',
-                'Book appointments early and keep receipt numbers for tracking.',
-            ],
-        ),
-        (
-            ['rent', 'housing', 'apartment', 'lease', 'landlord'],
-            [
-                'Search on trusted listing sites and compare commute + safety + total monthly cost.',
-                'Prepare ID, proof of income, and references before applying.',
-                'Read lease terms carefully (deposit, maintenance, renewal, penalties).'
-            ],
-            [
-                'Set your budget including utilities and internet.',
-                'Tour multiple units and document apartment condition before move-in.',
-                'Sign lease only after confirming all fees and move-out terms.',
-            ],
-        ),
-        (
-            ['tax', '1099', 'w-2', 'w-4', 'refund', 'irs'],
-            [
-                'Collect all forms first (W-2/1099/1098) before filing.',
-                'Use the correct filing status and include state return if required.',
-                'File before deadlines and keep PDF copies of all submissions.'
-            ],
-            [
-                'Create IRS account and gather identity/tax documents.',
-                'Prepare federal return, then state return, then submit.',
-                'Track refund status and respond quickly to IRS letters.',
-            ],
-        ),
-    ]
+    topic_guides = TOPIC_GUIDES
 
     summary = [
         'Use official government or provider websites for final verification.',
@@ -308,8 +401,12 @@ def local_fallback_reply(user):
     )
 
 def _clean_ai_text(text):
-    """Remove markdown bold and filter to safe Unicode characters."""
+    """Remove markdown formatting and filter to safe Unicode characters."""
     text = text.replace('**', '')
+    # Strip leading # header markers from lines
+    text = re.sub(r'(?m)^#+\s*', '', text)
+    # Normalize excessive blank lines (3+ newlines → 2)
+    text = re.sub(r'\n{3,}', '\n\n', text)
     cleaned = []
     for c in text:
         if ord(c) < 128 or unicodedata.category(c).startswith(('L', 'M', 'N', 'P', 'S', 'Z')):
@@ -337,11 +434,18 @@ def llm(system, user):
 
     full_system = system + "\n\n" + usa_prompt + "\n\nReference data:\n" + get_context()
 
+    key = _cache_key(full_system, user)
+    cached = _response_cache_get(key)
+    if cached is not None:
+        return cached
+
     text = call_vertex(system_prompt=full_system, user_prompt=user)
     if not text:
         return local_fallback_reply(user)
 
-    return _clean_ai_text(text)
+    result = _clean_ai_text(text)
+    _response_cache_set(key, result)
+    return result
 
 
 class BadRequestError(Exception):
@@ -371,6 +475,7 @@ def llm_json(system_prompt, user_prompt):
 
 @app.errorhandler(BadRequestError)
 def handle_bad_request(error):
+    logger.warning("Bad request: %s", error)
     return jsonify(error=str(error)), 400
 
 @app.errorhandler(Exception)
@@ -385,7 +490,8 @@ HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <title>USA Living Guide</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%87%BA%F0%9F%87%B8%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==" crossorigin="anonymous" referrerpolicy="no-referrer">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Segoe UI,Arial,sans-serif;background:#f0f4ff;color:#1e293b}
@@ -426,11 +532,15 @@ textarea{resize:vertical;min-height:90px}
 .btn:disabled{opacity:.65;cursor:not-allowed;transform:none}
 .output-wrap{position:relative;margin-top:8px}
 .output{background:#f8fafc;border:2px solid #e2e8f0;border-radius:12px;padding:20px;min-height:100px;white-space:pre-wrap;font-size:14px;line-height:1.75}
+.output.error{border-color:#ef4444;background:#fff5f5;color:#b91c1c}
+.output.loading{animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .copy-btn{position:absolute;top:10px;right:10px;background:#10b981;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer;opacity:0;transition:opacity .2s}
 .output-wrap:hover .copy-btn{opacity:1}
+@media(hover:none){.copy-btn{opacity:1}}
 .spinner{display:inline-block;width:16px;height:16px;border:3px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.trust-row{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 10px}.trust-chip{background:#fff;border:1px solid #dbeafe;color:#1e3a8a;padding:8px 12px;border-radius:999px;font-size:.82em;font-weight:600}.goal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:8px 0 18px}.goal-card{background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:12px;cursor:pointer;transition:.2s}.goal-card:hover{border-color:#3b82f6;transform:translateY(-2px)}.goal-card h4{font-size:.95em;color:#1e3a8a;margin-bottom:4px}.goal-card p{font-size:.8em;color:#64748b}.hero-cta{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:14px}.hero-cta button{background:#fff;color:#1e3a8a;border:none;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}.footer{text-align:center;padding:32px 20px;color:#64748b;font-size:.88em;line-height:2;background:#fff;margin-top:20px;border-radius:16px}
+.trust-row{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 10px}.trust-chip{background:#fff;border:1px solid #dbeafe;color:#1e3a8a;padding:8px 12px;border-radius:999px;font-size:.82em;font-weight:600}.goal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:8px 0 18px}.goal-card{background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:12px;cursor:pointer;transition:.2s}.goal-card:hover{border-color:#3b82f6;transform:translateY(-2px)}.goal-card h4{font-size:.95em;color:#1e3a8a;margin-bottom:4px}.goal-card p{font-size:.8em;color:#64748b}.hero-cta{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:14px}.hero-cta button{background:#fff;color:#1e3a8a;border:none;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}.footer{text-align:center;padding:32px 20px;color:#64748b;font-size:.88em;line-height:2;background:#fff;margin-top:20px;border-radius:16px}.char-count{font-size:.8em;color:#94a3b8;text-align:right;margin-top:2px}
 </style>
 </head>
 <body>
@@ -463,21 +573,21 @@ textarea{resize:vertical;min-height:90px}
     <div class="goal-card" data-quickstart="housing"><h4>Rent an Apartment</h4><p>Budget + lease checklist</p></div>
     <div class="goal-card" data-quickstart="tax"><h4>Tax Guide</h4><p>Forms + deadline summary</p></div>
   </div>
-  <div class="tabs" id="topicTabs">
-    <button type="button" class="active" data-tab="visa"><i class="fas fa-passport"></i>Visa</button>
-    <button type="button" data-tab="tax"><i class="fas fa-calculator"></i>Tax</button>
-    <button type="button" data-tab="rideshare"><i class="fas fa-car"></i>Gig Work</button>
-    <button type="button" data-tab="housing"><i class="fas fa-home"></i>Housing</button>
-    <button type="button" data-tab="health"><i class="fas fa-heartbeat"></i>Health</button>
-    <button type="button" data-tab="license"><i class="fas fa-id-card"></i>License</button>
-    <button type="button" data-tab="ssn"><i class="fas fa-id-card-alt"></i>SSN</button>
-    <button type="button" data-tab="bank"><i class="fas fa-university"></i>Bank</button>
-    <button type="button" data-tab="phone"><i class="fas fa-phone"></i>Phone</button>
-    <button type="button" data-tab="car"><i class="fas fa-car-side"></i>Car</button>
-    <button type="button" data-tab="transfer"><i class="fas fa-exchange-alt"></i>Money Transfer</button>
-    <button type="button" data-tab="flights"><i class="fas fa-plane"></i>Flights</button>
-    <button type="button" data-tab="ask"><i class="fas fa-question-circle"></i>Ask</button>
-    <button type="button" data-tab="feedback"><i class="fas fa-comment-dots"></i>Feedback</button>
+  <div class="tabs" id="topicTabs" role="tablist">
+    <button type="button" class="active" data-tab="visa" role="tab" aria-selected="true" aria-controls="visa"><i class="fas fa-passport"></i>Visa</button>
+    <button type="button" data-tab="tax" role="tab" aria-selected="false" aria-controls="tax"><i class="fas fa-calculator"></i>Tax</button>
+    <button type="button" data-tab="rideshare" role="tab" aria-selected="false" aria-controls="rideshare"><i class="fas fa-car"></i>Gig Work</button>
+    <button type="button" data-tab="housing" role="tab" aria-selected="false" aria-controls="housing"><i class="fas fa-home"></i>Housing</button>
+    <button type="button" data-tab="health" role="tab" aria-selected="false" aria-controls="health"><i class="fas fa-heartbeat"></i>Health</button>
+    <button type="button" data-tab="license" role="tab" aria-selected="false" aria-controls="license"><i class="fas fa-id-card"></i>License</button>
+    <button type="button" data-tab="ssn" role="tab" aria-selected="false" aria-controls="ssn"><i class="fas fa-id-card-alt"></i>SSN</button>
+    <button type="button" data-tab="bank" role="tab" aria-selected="false" aria-controls="bank"><i class="fas fa-university"></i>Bank</button>
+    <button type="button" data-tab="phone" role="tab" aria-selected="false" aria-controls="phone"><i class="fas fa-phone"></i>Phone</button>
+    <button type="button" data-tab="car" role="tab" aria-selected="false" aria-controls="car"><i class="fas fa-car-side"></i>Car</button>
+    <button type="button" data-tab="transfer" role="tab" aria-selected="false" aria-controls="transfer"><i class="fas fa-exchange-alt"></i>Money Transfer</button>
+    <button type="button" data-tab="flights" role="tab" aria-selected="false" aria-controls="flights"><i class="fas fa-plane"></i>Flights</button>
+    <button type="button" data-tab="ask" role="tab" aria-selected="false" aria-controls="ask"><i class="fas fa-question-circle"></i>Ask</button>
+    <button type="button" data-tab="feedback" role="tab" aria-selected="false" aria-controls="feedback"><i class="fas fa-comment-dots"></i>Feedback</button>
   </div>
 
   <div id="visa" class="tab active"><div class="card">
@@ -632,18 +742,18 @@ textarea{resize:vertical;min-height:90px}
     <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="uo">Copy</button></div>
   </div></div>
 
-  <div id="ask" class="tab"><div class="card">
+  <div id="ask" class="tab" role="tabpanel"><div class="card">
     <h2><i class="fas fa-question-circle"></i> Ask Any Question</h2>
     <div class="hint">🤖 Ask anything about life in the USA. You'll get a detailed answer.</div>
-    <div class="field"><label>What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?" maxlength="2000"></textarea></div>
+    <div class="field"><label for="q1">What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?" maxlength="2000"></textarea><div class="char-count" id="q1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
     <button type="button" class="btn" id="qb" data-action="ask">Answer</button>
     <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button type="button" class="copy-btn" data-copy-target="qo">Copy</button></div>
   </div></div>
 
-  <div id="feedback" class="tab"><div class="card">
+  <div id="feedback" class="tab" role="tabpanel"><div class="card">
     <h2><i class="fas fa-comment-dots"></i> Site Feedback</h2>
     <div class="hint">💬 Share your experience: what worked, what's missing, what should we improve?</div>
-    <div class="field"><label>Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..." maxlength="2000"></textarea></div>
+    <div class="field"><label for="fb1">Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..." maxlength="2000"></textarea><div class="char-count" id="fb1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
     <div class="field"><label>Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
     <button type="button" class="btn" id="fbb" data-action="feedback">Submit Feedback</button>
     <div class="output-wrap"><div id="fbo" class="output">Feedback status message will appear here...</div></div>
@@ -652,7 +762,7 @@ textarea{resize:vertical;min-height:90px}
 </div>
 <div class="footer">
   Feedback data is stored in memory only and cleared on restart<br>
-  <span style="font-size:.8em;color:#94a3b8">
+  <span style="font-size:.85em;color:#64748b">
     ⚠️ This tool is for informational purposes only. AI may make mistakes.
     For legal, financial, or medical matters, always consult a professional.
     No liability is accepted for decisions made based on AI output.
@@ -676,9 +786,9 @@ function show(tab,btn){
   const target=document.getElementById(tab);
   if(!target) return;
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b=>{b.classList.remove('active');b.setAttribute('aria-selected','false');});
   target.classList.add('active');
-  if(btn) btn.classList.add('active');
+  if(btn){btn.classList.add('active');btn.setAttribute('aria-selected','true');}
 }
 function cp(id){
   navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{
@@ -692,20 +802,27 @@ async function call(endpoint,data,outId,btnId,label){
   const btn=document.getElementById(btnId);
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Step 1/3: Preparing info';
+  out.classList.remove('error');
+  out.classList.add('loading');
   out.textContent='Step 2/3: Generating your guide...';
   try{
     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const j=await r.json().catch(()=>({}));
+    out.classList.remove('loading');
     if(!r.ok){
-      out.textContent='Error: '+(j.error || 'Request could not be processed.');
+      out.classList.add('error');
+      out.textContent='⚠️ Error: '+(j.error || 'Request could not be processed.');
       return;
     }
     out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
   }catch(e){
-    out.textContent='Connection error: '+e.message;
+    out.classList.remove('loading');
+    out.classList.add('error');
+    out.textContent='⚠️ Connection error: '+e.message;
   }finally{
     btn.disabled=false;
     btn.textContent=label;
+    out.scrollIntoView({behavior:'smooth',block:'nearest'});
   }
 }
 
@@ -758,6 +875,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (fn) fn();
     });
   });
+  // Character counters for textareas with maxlength
+  document.querySelectorAll('textarea[maxlength]').forEach(ta => {
+    const countEl = document.getElementById(ta.id + '_count');
+    if (!countEl) return;
+    const max = ta.getAttribute('maxlength');
+    const update = () => { countEl.textContent = ta.value.length + ' / ' + max; };
+    ta.addEventListener('input', update);
+    update();
+  });
 });
 
 </script>
@@ -765,14 +891,12 @@ document.addEventListener('DOMContentLoaded', () => {
 </html>"""# ─── ROUTES ──────────────────────────────────────────
 @app.route('/')
 def index():
-    ensure_bg_refresh_started()
     response = make_response(HTML)
     response.headers['Content-Type'] = 'text/html'
     return response
 
 @app.route('/healthz')
 def healthz():
-    ensure_bg_refresh_started()
     return jsonify(
         status='ok',
         vertex_configured=bool(GOOGLE_CLOUD_PROJECT and get_access_token())
