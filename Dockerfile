@@ -8,7 +8,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py ./
+# Copy all project files; .dockerignore handles exclusions (e.g. .env, .venv, .git)
+COPY . .
 
 ENV PORT=8080
 EXPOSE 8080
