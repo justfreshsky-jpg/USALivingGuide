@@ -600,33 +600,14 @@ textarea{resize:vertical;min-height:90px}
 <body>
 <div class="hero">
   <h1 style="cursor:pointer" title="Click to reload">🇺🇸 USA Living Guide</h1>
-  <p>Create your personal roadmap for your first 30 days in the USA in 2-3 minutes.</p>
   <div class="steps">
     <span class="step">1️⃣ Pick a Topic</span>
     <span class="step">2️⃣ Enter Your Info</span>
     <span class="step">3️⃣ Get Your Checklist</span>
   </div>
-  <div class="hero-cta">
-    <button type="button" data-quickstart="ssn">Start with SSN</button>
-    <button type="button" data-quickstart="visa">Visa Plan</button>
-    <button type="button" data-quickstart="ask">Quick Question</button>
-  </div>
 </div>
 <div class="container">
-  <div class="trust-row">
-    <span class="trust-chip">🔐 No personal data stored</span>
-    <span class="trust-chip">🧭 Step-by-step checklist</span>
-    <span class="trust-chip">🗓 Updated: 2026</span>
-  </div>
-  <div class="hint" style="margin-top:8px">
-    🍎 <strong>Usage tip:</strong> First pick a goal card, then generate a guide based on your situation.
-  </div>
-  <div class="goal-grid">
-    <div class="goal-card" data-quickstart="ssn"><h4>SSN Application</h4><p>Documents + office steps</p></div>
-    <div class="goal-card" data-quickstart="bank"><h4>Bank Account</h4><p>Options without SSN</p></div>
-    <div class="goal-card" data-quickstart="housing"><h4>Rent an Apartment</h4><p>Budget + lease checklist</p></div>
-    <div class="goal-card" data-quickstart="tax"><h4>Tax Guide</h4><p>Forms + deadline summary</p></div>
-  </div>
+
   <div class="tabs" id="topicTabs" role="tablist">
     <button type="button" class="active" data-tab="visa" role="tab" aria-selected="true" aria-controls="visa"><i class="fas fa-passport"></i>Visa</button>
     <button type="button" data-tab="tax" role="tab" aria-selected="false" aria-controls="tax"><i class="fas fa-calculator"></i>Tax</button>
@@ -807,15 +788,11 @@ textarea{resize:vertical;min-height:90px}
   <div id="feedback" class="tab" role="tabpanel"><div class="card">
     <h2><i class="fas fa-comment-dots"></i> Site Feedback</h2>
     <div class="hint">💬 Share your experience: what worked, what's missing, what should we improve?</div>
-    <div class="field"><label for="fb1">Your Message</label><textarea id="fb1" rows="4" placeholder="E.g. Tab transitions could be faster, output should be PDF, more official links needed..." maxlength="2000"></textarea><div class="char-count" id="fb1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
-    <div class="field"><label for="fb2">Optional Email</label><input id="fb2" placeholder="name@example.com" maxlength="2000"></div>
-    <button type="button" class="btn" id="fbb" data-action="feedback">Submit Feedback</button>
-    <div class="output-wrap"><div id="fbo" class="output">Feedback status message will appear here...</div></div>
+    <p>Send your feedback directly to: <a href="mailto:admin@usalivingguide.com">admin@usalivingguide.com</a></p>
   </div></div>
 
 </div>
 <div class="footer">
-  Feedback data is stored in memory only and cleared on restart<br>
   <span style="font-size:.85em;color:#64748b">
     ⚠️ This tool is for informational purposes only. AI may make mistakes.
     For legal, financial, or medical matters, always consult a professional.
@@ -852,14 +829,40 @@ function cp(id){
     setTimeout(()=>btn.textContent='Copy',2000);
   });
 }
+function formatResult(text){
+  function escape(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  const paragraphs=text.split(/\\n{2,}/);
+  return paragraphs.map(para=>{
+    const lines=para.split('\\n').filter(l=>l.trim());
+    if(!lines.length) return '';
+    const isOrdered=lines.every(l=>/^\\d+\\.\\s/.test(l.trim()));
+    const isBullet=lines.every(l=>/^[-\u2022]\\s/.test(l.trim()));
+    if(isOrdered){
+      const items=lines.map(l=>'<li>'+escape(l.trim().replace(/^\\d+\\.\\s/,''))+'</li>').join('');
+      return '<ol>'+items+'</ol>';
+    }
+    if(isBullet){
+      const items=lines.map(l=>'<li>'+escape(l.trim().replace(/^[-\u2022]\\s/,''))+'</li>').join('');
+      return '<ul>'+items+'</ul>';
+    }
+    return lines.map(l=>{
+      const t=l.trim();
+      if(!t) return '';
+      if(/^[A-Z][^a-z]{3,}$/.test(t)||(/[:\uFF1A]$/.test(t)&&t.length<80)){
+        return '<p><strong>'+escape(t)+'</strong></p>';
+      }
+      return '<p>'+escape(t)+'</p>';
+    }).join('');
+  }).join('');
+}
 async function call(endpoint,data,outId,btnId,label){
   const out=document.getElementById(outId);
   const btn=document.getElementById(btnId);
   btn.disabled=true;
-  btn.innerHTML='<span class="spinner"></span>Step 1/3: Preparing info';
+  btn.innerHTML='<span class="spinner"></span> Loading...';
   out.classList.remove('error');
   out.classList.add('loading');
-  out.textContent='Step 2/3: Generating your guide...';
+  out.textContent='Generating your guide...';
   try{
     const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const j=await r.json().catch(()=>({}));
@@ -869,7 +872,7 @@ async function call(endpoint,data,outId,btnId,label){
       out.textContent='⚠️ Error: '+(j.error || 'Request could not be processed.');
       return;
     }
-    out.textContent='Step 3/3: Result ready ✅\n\n'+(j.result || 'Could not generate result.');
+    out.innerHTML=formatResult(j.result || 'Could not generate result.');
   }catch(e){
     out.classList.remove('loading');
     out.classList.add('error');
@@ -878,22 +881,6 @@ async function call(endpoint,data,outId,btnId,label){
     btn.disabled=false;
     btn.textContent=label;
     out.scrollIntoView({behavior:'smooth',block:'nearest'});
-  }
-}
-
-async function sendFeedback(){
-  const out=document.getElementById('fbo');
-  const btn=document.getElementById('fbb');
-  btn.disabled=true;
-  out.textContent='Sending...';
-  try{
-    const r=await fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:g('fb1'),contact:g('fb2')})});
-    const j=await r.json().catch(()=>({}));
-    out.textContent=r.ok ? (j.result || 'Thank you!') : ('Error: '+(j.error || 'Could not send'));
-  }catch(e){
-    out.textContent='Connection error: '+e.message;
-  }finally{
-    btn.disabled=false;
   }
 }
 
@@ -910,8 +897,7 @@ const ACTIONS = {
   car: () => call('/car',{state:g('ar1'),topic:g('ar2')},'aro','arb','Car Guide'),
   transfer: () => call('/transfer',{topic:g('w1')},'wo','wb','Money Transfer Guide'),
   flights: () => call('/flights',{airline:g('u1'),topic:g('u2')},'uo','ub','Flight Guide'),
-  ask: () => call('/ask',{question:g('q1')},'qo','qb','Answer'),
-  feedback: () => sendFeedback()
+  ask: () => call('/ask',{question:g('q1')},'qo','qb','Answer')
 };
 
 document.addEventListener('DOMContentLoaded', () => {
