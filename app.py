@@ -473,12 +473,28 @@ def llm(system, user):
     • Add emoji to each step: ✅ 🚀 💰 📱 🏠 🪪 ✈️ 🏥 💳
     • CAPITALIZE important words
     • Short paragraphs, long lists
-    • USE OUTPUT TEMPLATE:
-      1) Quick Summary (3 items)
-      2) Step-by-Step Checklist
-      3) Common Mistakes / Risks
-      4) Official Links (if available)
-      5) Next Step (one clear recommendation)
+
+    YOU MUST USE EXACTLY THIS OUTPUT FORMAT WITH THESE SECTION HEADERS:
+
+    QUICK SUMMARY:
+    (3 bullet points)
+
+    STEP-BY-STEP CHECKLIST:
+    (numbered steps)
+
+    COMMON MISTAKES / RISKS:
+    (bullet points)
+
+    OFFICIAL LINKS:
+    (links or "N/A")
+
+    NEXT STEP:
+    (one clear sentence)
+
+    ---
+    TÜRKÇE ÖZET:
+    (Translate the Quick Summary and Next Step into Turkish in 3-5 sentences)
+
     ⚠️ USA / NJ / NY ONLY!
     """
 
@@ -635,7 +651,7 @@ textarea{resize:vertical;min-height:90px}
     </div>
     <div class="field"><label for="v3">Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
     <button type="button" class="btn" id="vb" data-action="visa">Generate Visa Plan</button>
-    <div class="output-wrap"><div id="vo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="vo">Copy</button></div>
+    <div class="output-wrap"><div id="vo" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="vo">Copy</button></div>
   </div></div>
 
   <div id="tax" class="tab"><div class="card">
@@ -650,7 +666,7 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label for="t4">State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
     </div>
     <button type="button" class="btn" id="tb" data-action="tax">Generate Tax Checklist</button>
-    <div class="output-wrap"><div id="to" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
+    <div class="output-wrap"><div id="to" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
   </div></div>
 
   <div id="rideshare" class="tab"><div class="card">
@@ -662,7 +678,7 @@ textarea{resize:vertical;min-height:90px}
     </div>
     <div class="field"><label for="r3">Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
     <button type="button" class="btn" id="rb" data-action="rideshare">Generate Plan</button>
-    <div class="output-wrap"><div id="ro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ro">Copy</button></div>
+    <div class="output-wrap"><div id="ro" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="ro">Copy</button></div>
   </div></div>
 
   <div id="housing" class="tab"><div class="card">
@@ -674,7 +690,7 @@ textarea{resize:vertical;min-height:90px}
     </div>
     <div class="field"><label for="e3">Special Situation</label><input id="e3" placeholder="e.g. No SSN, no credit score, have pets" maxlength="2000"></div>
     <button type="button" class="btn" id="eb" data-action="housing">Generate Plan</button>
-    <div class="output-wrap"><div id="eo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="eo">Copy</button></div>
+    <div class="output-wrap"><div id="eo" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="eo">Copy</button></div>
   </div></div>
 
   <div id="health" class="tab"><div class="card">
@@ -685,7 +701,7 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label for="h2">Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="hb" data-action="health">Generate Guide</button>
-    <div class="output-wrap"><div id="ho" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="ho">Copy</button></div>
+    <div class="output-wrap"><div id="ho" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="ho">Copy</button></div>
   </div></div>
 
   <div id="license" class="tab"><div class="card">
@@ -696,7 +712,7 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label for="l2">Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
     </div>
     <button type="button" class="btn" id="lb" data-action="license">Generate Guide</button>
-    <div class="output-wrap"><div id="lo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="lo">Copy</button></div>
+    <div class="output-wrap"><div id="lo" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="lo">Copy</button></div>
   </div></div>
 
 <div id="ssn" class="tab">
@@ -726,7 +742,7 @@ textarea{resize:vertical;min-height:90px}
     </div>
     <button type="button" class="btn" id="ssb" data-action="ssn">Generate SSN Guide</button>
     <div class="output-wrap">
-      <div id="sso" class="output">Results will appear here...</div>
+      <div id="sso" class="output">Your personalized guide will appear here...</div>
       <button type="button" class="copy-btn" data-copy-target="sso">Copy</button>
     </div>
   </div>
@@ -737,7 +753,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">💳 <strong>Tip:</strong> Chase/BofA open accounts with passport. Start credit score with a secured card.</div>
     <div class="field"><label for="ba1">Situation</label><select id="ba1"><option>Open bank account without SSN</option><option>Get a credit card</option><option>Build credit score from scratch</option><option>Best free bank?</option></select></div>
     <button type="button" class="btn" id="bb" data-action="bank">Generate Guide</button>
-    <div class="output-wrap"><div id="bo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="bo">Copy</button></div>
+    <div class="output-wrap"><div id="bo" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="bo">Copy</button></div>
   </div></div>
 
   <div id="phone" class="tab"><div class="card">
@@ -745,7 +761,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">📱 <strong>Tip:</strong> Get a free US number without SSN using Google Voice.</div>
     <div class="field"><label for="p1">Topic</label><select id="p1"><option>Free number (Google Voice)</option><option>Cheap plans (Mint, Visible, T-Mobile)</option><option>Contract plan without SSN</option><option>Cheap international calls</option></select></div>
     <button type="button" class="btn" id="pb" data-action="phone">Generate Guide</button>
-    <div class="output-wrap"><div id="po" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="po">Copy</button></div>
+    <div class="output-wrap"><div id="po" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="po">Copy</button></div>
   </div></div>
 
   <div id="car" class="tab"><div class="card">
@@ -756,7 +772,7 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label for="ar2">Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="arb" data-action="car">Generate Guide</button>
-    <div class="output-wrap"><div id="aro" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="aro">Copy</button></div>
+    <div class="output-wrap"><div id="aro" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="aro">Copy</button></div>
   </div></div>
 
   <div id="transfer" class="tab"><div class="card">
@@ -764,7 +780,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">💸 <strong>Tip:</strong> Send money internationally with the lowest fees using Wise.</div>
     <div class="field"><label for="w1">Topic</label><select id="w1"><option>Send money abroad with Wise</option><option>Wise limits and fees</option><option>How to use Zelle?</option><option>Venmo / CashApp guide</option></select></div>
     <button type="button" class="btn" id="wb" data-action="transfer">Generate Guide</button>
-    <div class="output-wrap"><div id="wo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="wo">Copy</button></div>
+    <div class="output-wrap"><div id="wo" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="wo">Copy</button></div>
   </div></div>
 
   <div id="flights" class="tab"><div class="card">
@@ -775,7 +791,7 @@ textarea{resize:vertical;min-height:90px}
       <div class="field"><label for="u2">Topic</label><select id="u2"><option>Baggage fees and rules</option><option>How to find cheapest tickets?</option><option>Check-in guide</option><option>Refund / cancellation policy</option></select></div>
     </div>
     <button type="button" class="btn" id="ub" data-action="flights">Generate Guide</button>
-    <div class="output-wrap"><div id="uo" class="output">Results will appear here...</div><button type="button" class="copy-btn" data-copy-target="uo">Copy</button></div>
+    <div class="output-wrap"><div id="uo" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="uo">Copy</button></div>
   </div></div>
 
   <div id="ask" class="tab" role="tabpanel"><div class="card">
@@ -783,7 +799,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">🤖 Ask anything about life in the USA. You'll get a detailed answer.</div>
     <div class="field"><label for="q1">What's your question?</label><textarea id="q1" rows="4" placeholder="e.g. Can I find a job without SSN? What should I do in my first month?" maxlength="2000"></textarea><div class="char-count" id="q1_count" aria-live="polite" aria-atomic="true">0 / 2000</div></div>
     <button type="button" class="btn" id="qb" data-action="ask">Answer</button>
-    <div class="output-wrap"><div id="qo" class="output">Answer will appear here...</div><button type="button" class="copy-btn" data-copy-target="qo">Copy</button></div>
+    <div class="output-wrap"><div id="qo" class="output">Your answer will appear here...</div><button type="button" class="copy-btn" data-copy-target="qo">Copy</button></div>
   </div></div>
 
   <div id="feedback" class="tab" role="tabpanel"><div class="card">
@@ -836,6 +852,10 @@ function formatResult(text){
   return paragraphs.map(para=>{
     const lines=para.split('\\n').filter(l=>l.trim());
     if(!lines.length) return '';
+    // Horizontal rule
+    if(lines.length===1 && /^-{3,}$/.test(lines[0].trim())){
+      return '<hr style="border:none;border-top:1px solid #e2e8f0;margin:12px 0">';
+    }
     const isOrdered=lines.every(l=>/^\\d+\\.\\s/.test(l.trim()));
     const isBullet=lines.every(l=>/^[-\u2022]\\s/.test(l.trim()));
     if(isOrdered){
@@ -849,8 +869,9 @@ function formatResult(text){
     return lines.map(l=>{
       const t=l.trim();
       if(!t) return '';
-      if(/^[A-Z][^a-z]{3,}$/.test(t)||(/[:\uFF1A]$/.test(t)&&t.length<80)){
-        return '<p><strong>'+escape(t)+'</strong></p>';
+      // Bold section headers: ALL CAPS WITH COLON, or ends with colon and short
+      if(/^[A-ZÇĞİÖŞÜ\s\/]{4,}:$/.test(t) || (/[:\uFF1A]$/.test(t) && t.length < 80 && /[A-Z]/.test(t))){
+        return '<p><strong style="color:#1e3a8a;font-size:1em">'+escape(t)+'</strong></p>';
       }
       return '<p>'+escape(t)+'</p>';
     }).join('');
