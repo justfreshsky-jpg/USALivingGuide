@@ -600,6 +600,7 @@ textarea{resize:vertical;min-height:90px}
 <body>
 <div class="hero">
   <h1 style="cursor:pointer" title="Click to reload">🇺🇸 USA Living Guide</h1>
+  <p class="hero-desc">AI-powered guide for newcomers to the United States — get step-by-step help with visas, SSN, taxes, housing, healthcare, and more. No personal data is stored.</p>
   <div class="steps">
     <span class="step">1️⃣ Pick a Topic</span>
     <span class="step">2️⃣ Enter Your Info</span>
