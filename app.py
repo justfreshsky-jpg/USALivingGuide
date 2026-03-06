@@ -468,6 +468,7 @@ def _clean_ai_text(text):
 
 def llm(system, user):
     usa_prompt = """
+    🇺🇸 ALL RESPONSES MUST BE IN ENGLISH ONLY. DO NOT use any other language. Do not include Turkish or any non-English text.
     🇺🇸 ONLY ANSWER ABOUT USA-RELATED TOPICS
     ✅ USA VISA / SSN / BANK / HOUSING / UBER / TAX / HEALTH
     • Add emoji to each step: ✅ 🚀 💰 📱 🏠 🪪 ✈️ 🏥 💳
@@ -490,10 +491,6 @@ def llm(system, user):
 
     NEXT STEP:
     (one clear sentence)
-
-    ---
-    TÜRKÇE ÖZET:
-    (Translate the Quick Summary and Next Step into Turkish in 3-5 sentences)
 
     ⚠️ USA / NJ / NY ONLY!
     """
