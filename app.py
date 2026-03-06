@@ -601,7 +601,12 @@ textarea{resize:vertical;min-height:90px}
 .btn:hover{transform:translateY(-2px);box-shadow:0 8px 25px rgba(30,64,175,.4)}
 .btn:disabled{opacity:.65;cursor:not-allowed;transform:none}
 .output-wrap{position:relative;margin-top:8px}
-.output{background:#f8fafc;border:2px solid #e2e8f0;border-radius:12px;padding:20px;min-height:100px;white-space:pre-wrap;font-size:14px;line-height:1.75}
+.output{background:#f8fafc;border:2px solid #e2e8f0;border-radius:12px;padding:20px;min-height:100px;font-size:14px;line-height:1.8}
+.output p{margin-bottom:10px}
+.output ol,.output ul{margin:8px 0 14px 20px;padding:0}
+.output li{margin-bottom:6px;line-height:1.7}
+.output strong{color:#1e3a8a;font-size:0.95em;display:block;margin-top:16px;margin-bottom:4px}
+.output hr{border:none;border-top:1px solid #e2e8f0;margin:16px 0}
 .output.error{border-color:#ef4444;background:#fff5f5;color:#b91c1c}
 .output.loading{animation:pulse 1.5s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -647,7 +652,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">🎯 <strong>For newcomers:</strong> Start with J-1, switch to H-1B once you find a job.</div>
     <div class="form-row">
       <div class="field"><label for="v1">Visa Type</label><select id="v1"><option>J-1 Student</option><option>H-1B Work</option><option>E-2 Investor</option><option>Green Card (EB)</option><option>F-1 Student</option><option>Visitor B-2</option></select></div>
-      <div class="field"><label for="v2">State</label><input id="v2" placeholder="e.g. New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="v2">State</label><select id="v2"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select></div>
     </div>
     <div class="field"><label for="v3">Special Situation</label><input id="v3" placeholder="e.g. First application, extension, denied" maxlength="2000"></div>
     <button type="button" class="btn" id="vb" data-action="visa">Generate Visa Plan</button>
@@ -663,7 +668,7 @@ textarea{resize:vertical;min-height:90px}
     </div>
     <div class="form-row">
       <div class="field"><label for="t3">Visa Type</label><select id="t3"><option>F-1 / J-1</option><option>H-1B</option><option>Green Card</option><option>Citizen</option></select></div>
-      <div class="field"><label for="t4">State</label><input id="t4" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="t4">State</label><select id="t4"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select></div>
     </div>
     <button type="button" class="btn" id="tb" data-action="tax">Generate Tax Checklist</button>
     <div class="output-wrap"><div id="to" class="output">Your personalized guide will appear here...</div><button type="button" class="copy-btn" data-copy-target="to">Copy</button></div>
@@ -674,7 +679,7 @@ textarea{resize:vertical;min-height:90px}
     <div class="hint">🚗 <strong>For newcomers:</strong> License + car + SSN is enough. $800-1500/week.</div>
     <div class="form-row">
       <div class="field"><label for="r1">App</label><select id="r1"><option>Uber</option><option>Lyft</option><option>Both</option></select></div>
-      <div class="field"><label for="r2">State</label><input id="r2" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="r2">State</label><select id="r2"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select></div>
     </div>
     <div class="field"><label for="r3">Topic</label><select id="r3"><option>How do I get started?</option><option>1099 form / taxes</option><option>How much can I earn per week?</option><option>Expense deductions</option></select></div>
     <button type="button" class="btn" id="rb" data-action="rideshare">Generate Plan</button>
@@ -697,7 +702,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-heartbeat"></i> Free Health Insurance</h2>
     <div class="hint">🏥 <strong>Tip:</strong> Medicaid is free in NJ for low income. Some clinics don't require documents.</div>
     <div class="form-row">
-      <div class="field"><label for="h1">State</label><input id="h1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="h1">State</label><select id="h1"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select></div>
       <div class="field"><label for="h2">Situation</label><select id="h2"><option>No insurance, how do I get it?</option><option>How do I apply for Medicaid?</option><option>Where are free clinics?</option><option>Can I get insurance without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="hb" data-action="health">Generate Guide</button>
@@ -708,7 +713,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-id-card"></i> Driver's License (DMV)</h2>
     <div class="hint">🪪 <strong>Tip:</strong> NJ has the 6 Points of ID system. Even undocumented can get a license.</div>
     <div class="form-row">
-      <div class="field"><label for="l1">State</label><input id="l1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="l1">State</label><select id="l1"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select></div>
       <div class="field"><label for="l2">Situation</label><select id="l2"><option>Getting it for the first time</option><option>Converting a foreign license</option><option>No SSN / ITIN</option><option>Need Real ID</option></select></div>
     </div>
     <button type="button" class="btn" id="lb" data-action="license">Generate Guide</button>
@@ -733,7 +738,7 @@ textarea{resize:vertical;min-height:90px}
       </div>
       <div class="field">
         <label for="ss2">State</label>
-        <input id="ss2" placeholder="New Jersey" maxlength="2000">
+        <select id="ss2"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select>
       </div>
     </div>
     <div class="field">
@@ -768,7 +773,7 @@ textarea{resize:vertical;min-height:90px}
     <h2><i class="fas fa-car-side"></i> Car Rental / Purchase</h2>
     <div class="hint">🚗 <strong>Tip:</strong> You can buy a car without SSN. Start with CarMax/Carvana.</div>
     <div class="form-row">
-      <div class="field"><label for="ar1">State</label><input id="ar1" placeholder="New Jersey" maxlength="2000"></div>
+      <div class="field"><label for="ar1">State</label><select id="ar1"><option value="New Jersey">New Jersey</option><option value="New York">New York</option><option value="California">California</option><option value="Texas">Texas</option><option value="Florida">Florida</option><option value="Illinois">Illinois</option><option value="Pennsylvania">Pennsylvania</option><option value="Massachusetts">Massachusetts</option><option value="Georgia">Georgia</option><option value="Virginia">Virginia</option><option value="Washington">Washington</option><option value="Michigan">Michigan</option><option value="Maryland">Maryland</option><option value="Connecticut">Connecticut</option><option value="Ohio">Ohio</option></select></div>
       <div class="field"><label for="ar2">Topic</label><select id="ar2"><option>Buy a used car</option><option>Rent a car</option><option>Get car insurance</option><option>Can I buy without SSN?</option></select></div>
     </div>
     <button type="button" class="btn" id="arb" data-action="car">Generate Guide</button>
@@ -866,7 +871,7 @@ function formatResult(text){
       const items=lines.map(l=>'<li>'+escape(l.trim().replace(/^[-\u2022]\\s/,''))+'</li>').join('');
       return '<ul>'+items+'</ul>';
     }
-    return lines.map(l=>{
+    return '<div style="margin-bottom:14px">'+lines.map(l=>{
       const t=l.trim();
       if(!t) return '';
       // Bold section headers: ALL CAPS WITH COLON, or ends with colon and short
@@ -874,7 +879,7 @@ function formatResult(text){
         return '<p><strong style="color:#1e3a8a;font-size:1em">'+escape(t)+'</strong></p>';
       }
       return '<p>'+escape(t)+'</p>';
-    }).join('');
+    }).join('')+'</div>';
   }).join('');
 }
 async function call(endpoint,data,outId,btnId,label){
